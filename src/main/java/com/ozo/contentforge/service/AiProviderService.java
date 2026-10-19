@@ -400,7 +400,12 @@ public class AiProviderService {
                 Map<String, Object> body = Map.of(
                         "text", text,
                         "model_id", elevenLabsModel,
-                        "voice_settings", Map.of("stability", 0.5, "similarity_boost", 0.75)
+                        "voice_settings", Map.of(
+                                "stability", 0.45,
+                                "similarity_boost", 0.88,
+                                "style", 0.10,
+                                "use_speaker_boost", true
+                        )
                 );
 
                 HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);

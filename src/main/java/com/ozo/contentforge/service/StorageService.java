@@ -226,31 +226,10 @@ public class StorageService {
         return key;
     }
 
-    private final Path localStorageDir = Path.of("c:/projects/cf/media_storage");
-
-    public Path getLocalFilePath(String s3Key) {
-        if (s3Key == null || s3Key.isBlank()) return null;
-        String clean = extractS3Key(s3Key);
-        return localStorageDir.resolve(clean);
-    }
-
-    public void saveLocalFile(String s3Key, byte[] data) {
-        try {
-            Path target = getLocalFilePath(s3Key);
-            if (target != null) {
-                Files.createDirectories(target.getParent());
-                Files.write(target, data);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to cache media locally for key {}: {}", s3Key, e.getMessage());
-        }
-    }
-
     /**
-     * Upload an object directly to AWS S3, with local caching and CLI fallback
+     * Upload an object directly to AWS S3, with ephemeral CLI fallback
      */
     public void putS3Object(String s3Key, byte[] data, String contentType) {
-        saveLocalFile(s3Key, data);
         try {
             PutObjectRequest putReq = PutObjectRequest.builder()
                     .bucket(s3Bucket)
@@ -261,16 +240,17 @@ public class StorageService {
             log.info("Uploaded media to AWS S3: s3://{}/{}", s3Bucket, s3Key);
         } catch (Exception e) {
             log.warn("Direct upload to AWS S3 encountered error (s3://{}/{}): {}. Executing AWS CLI sync...", s3Bucket, s3Key, e.getMessage());
-            tryUploadViaCli(s3Key, contentType);
+            tryUploadViaCli(s3Key, contentType, data);
         }
     }
 
-    private void tryUploadViaCli(String s3Key, String contentType) {
+    private void tryUploadViaCli(String s3Key, String contentType, byte[] data) {
+        Path tempFile = null;
         try {
-            Path file = getLocalFilePath(s3Key);
-            if (file == null || !Files.exists(file)) return;
+            tempFile = Files.createTempFile("s3up_", ".tmp");
+            Files.write(tempFile, data);
             ProcessBuilder pb = new ProcessBuilder(
-                    "aws", "s3", "cp", file.toAbsolutePath().toString(),
+                    "aws", "s3", "cp", tempFile.toAbsolutePath().toString(),
                     "s3://" + s3Bucket + "/" + s3Key,
                     "--content-type", contentType
             );
@@ -287,18 +267,23 @@ public class StorageService {
             }
         } catch (Exception e) {
             log.debug("AWS CLI upload skipped or unavailable: {}", e.getMessage());
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (Exception ignored) {}
+            }
         }
     }
 
-    private boolean tryDownloadViaCli(String s3Key) {
+    private byte[] tryDownloadViaCli(String s3Key) {
+        Path tempFile = null;
         try {
-            Path file = getLocalFilePath(s3Key);
-            if (file == null) return false;
-            Files.createDirectories(file.getParent());
+            tempFile = Files.createTempFile("s3down_", ".tmp");
             ProcessBuilder pb = new ProcessBuilder(
                     "aws", "s3", "cp",
                     "s3://" + s3Bucket + "/" + s3Key,
-                    file.toAbsolutePath().toString()
+                    tempFile.toAbsolutePath().toString()
             );
             pb.environment().put("AWS_ACCESS_KEY_ID", accessKeyId);
             pb.environment().put("AWS_SECRET_ACCESS_KEY", secretAccessKey);
@@ -306,35 +291,37 @@ public class StorageService {
             pb.redirectErrorStream(true);
             Process proc = pb.start();
             boolean done = proc.waitFor(60, TimeUnit.SECONDS);
-            return done && proc.exitValue() == 0 && Files.exists(file) && Files.size(file) > 0;
+            if (done && proc.exitValue() == 0 && Files.exists(tempFile) && Files.size(tempFile) > 0) {
+                return Files.readAllBytes(tempFile);
+            }
+            return null;
         } catch (Exception e) {
             log.debug("AWS CLI download skipped: {}", e.getMessage());
-            return false;
+            return null;
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (Exception ignored) {}
+            }
         }
     }
 
     /**
-     * Retrieve media bytes from local cache or AWS S3
+     * Retrieve media bytes directly from AWS S3
      */
     public byte[] getS3Object(String s3Key) throws IOException {
-        Path local = getLocalFilePath(s3Key);
-        if (local != null && Files.exists(local) && Files.size(local) > 0) {
-            return Files.readAllBytes(local);
-        }
         try {
             GetObjectRequest getReq = GetObjectRequest.builder()
                     .bucket(s3Bucket)
                     .key(s3Key)
                     .build();
             ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getReq);
-            byte[] bytes = objectBytes.asByteArray();
-            saveLocalFile(s3Key, bytes);
-            return bytes;
+            return objectBytes.asByteArray();
         } catch (Exception e) {
-            if (tryDownloadViaCli(s3Key)) {
-                if (local != null && Files.exists(local) && Files.size(local) > 0) {
-                    return Files.readAllBytes(local);
-                }
+            byte[] cliBytes = tryDownloadViaCli(s3Key);
+            if (cliBytes != null && cliBytes.length > 0) {
+                return cliBytes;
             }
             log.error("Failed to retrieve media from AWS S3 (s3://{}/{}): {}", s3Bucket, s3Key, e.getMessage());
             throw new IOException("Failed to retrieve AWS S3 object: " + e.getMessage(), e);

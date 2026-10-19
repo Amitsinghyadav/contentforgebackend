@@ -35,16 +35,6 @@ public class MediaUploadController {
 
     @GetMapping("/s3")
     public ResponseEntity<?> getMediaFromS3(@RequestParam("key") String s3Key) {
-        java.nio.file.Path localFile = storageService.getLocalFilePath(s3Key);
-        if (localFile != null && java.nio.file.Files.exists(localFile)) {
-            try {
-                byte[] data = java.nio.file.Files.readAllBytes(localFile);
-                if (data.length > 0) {
-                    return createMediaResponse(s3Key, data);
-                }
-            } catch (Exception ignored) {}
-        }
-
         try {
             // Generate presigned AWS S3 URL on demand and redirect (302 Found) for high-performance direct streaming
             String presignedUrl = storageService.getPresignedUrl(s3Key, java.time.Duration.ofHours(2));
