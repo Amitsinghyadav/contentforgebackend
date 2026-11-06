@@ -11,9 +11,15 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -30,6 +36,7 @@ public class ContentPostService {
     private final MediaJobRepository mediaJobRepository;
     private final BrandProfileRepository brandRepository;
     private final PresenterProfileRepository presenterRepository;
+    private final VideoAvatarRepository videoAvatarRepository;
     private final VoiceLibraryRepository voiceRepository;
     private final GeneratedAssetRepository assetRepository;
     private final MasterSettingsService settingsService;
@@ -48,6 +55,7 @@ public class ContentPostService {
                               MasterSettingsService settingsService,
                               BrandProfileRepository brandRepository,
                               PresenterProfileRepository presenterRepository,
+                              VideoAvatarRepository videoAvatarRepository,
                               VoiceLibraryRepository voiceRepository,
                               AiProviderService aiProviderService,
                               StorageService storageService,
@@ -63,6 +71,7 @@ public class ContentPostService {
         this.settingsService = settingsService;
         this.brandRepository = brandRepository;
         this.presenterRepository = presenterRepository;
+        this.videoAvatarRepository = videoAvatarRepository;
         this.voiceRepository = voiceRepository;
         this.aiProviderService = aiProviderService;
         this.storageService = storageService;
@@ -381,6 +390,39 @@ public class ContentPostService {
     }
 
     /**
+     * Retries and resumes the entire media generation pipeline for a post
+     * (Voice -> Avatar with lip-sync & gestures -> Runway B-Roll -> Composition/Merge)
+     */
+    @Transactional
+    public ContentPostEntity retryMediaGeneration(Long postId) {
+        ContentPostEntity post = postRepository.findById(postId)
+                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+
+        post.setStatus(PostStatus.MEDIA_GENERATING);
+        post.setErrorMessage(null);
+        post = postRepository.save(post);
+
+        // Reset scene statuses to QUEUED and clear previous error messages
+        List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
+        for (ContentSceneEntity scene : scenes) {
+            scene.setStatus(JobStatus.QUEUED);
+            scene.setErrorMessage(null);
+            sceneRepository.save(scene);
+        }
+
+        final Long targetPostId = postId;
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                triggerMediaGeneration(targetPostId);
+            } catch (Exception e) {
+                log.error("Media generation background retry error for post {}: {}", targetPostId, e.getMessage(), e);
+            }
+        });
+
+        return post;
+    }
+
+    /**
      * Asynchronous Media Pipeline: Voice -> Avatar & B-roll in parallel -> Composition
      */
     @Async
@@ -404,18 +446,16 @@ public class ContentPostService {
         }
 
         post.setStatus(PostStatus.MEDIA_GENERATING);
+        post.setErrorMessage(null);
         postRepository.save(post);
 
         try {
             double totalCost = 0.0;
 
             // 1. Voice generation (default to Amit Singh Yadav's real cloned ElevenLabs voice)
-            PresenterProfileEntity presenter = null;
+            PresenterProfileEntity explicitPresenter = null;
             if (post.getPresenterId() != null) {
-                presenter = presenterRepository.findById(post.getPresenterId()).orElse(null);
-            }
-            if (presenter == null) {
-                presenter = presenterRepository.findByIsDefaultTrue().orElse(null);
+                explicitPresenter = presenterRepository.findById(post.getPresenterId()).orElse(null);
             }
             VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
             String voiceId = (voice != null && voice.getProviderVoiceId() != null && !voice.getProviderVoiceId().isBlank())
@@ -435,8 +475,14 @@ public class ContentPostService {
                     : ((post.getPresenterScript() != null ? post.getPresenterScript() : "") + " "
                        + (post.getVoiceoverScript() != null ? post.getVoiceoverScript() : ""));
 
-            GeneratedAssetEntity voiceAsset = aiProviderService.generateVoiceAudio(postId, narrationText, voiceId);
-            post.setVoiceAudioUrl(voiceAsset.getStorageUrl());
+            if (post.getVoiceAudioUrl() == null || post.getVoiceAudioUrl().isBlank()) {
+                GeneratedAssetEntity voiceAsset = aiProviderService.generateVoiceAudio(postId, narrationText, voiceId);
+                post.setVoiceAudioUrl(voiceAsset.getStorageUrl());
+            } else {
+                log.info("Reusing existing voice audio for post {}: {}", postId, post.getVoiceAudioUrl());
+            }
+            syncSceneTimings(postId);
+            scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
 
             // 2. Generate Master Avatar Video ONCE with complete master audio track
             boolean hasAvatarScenes = scenes.stream().anyMatch(s -> s.getSceneType() == SceneType.AVATAR);
@@ -446,9 +492,27 @@ public class ContentPostService {
                 int totalDuration = post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45;
                 log.info("Generating master HeyGen avatar video for post {} ({}s duration)...", postId, totalDuration);
 
-                String resolvedAvatar = (presenter != null && presenter.getAvatarId() != null && !presenter.getAvatarId().isBlank())
-                        ? presenter.getAvatarId()
-                        : null;
+                // Priority: Explicit Post Presenter -> Default Video Avatar (Gestures) -> Default Talking Photo -> Fallback
+                String resolvedAvatar = null;
+                if (explicitPresenter != null && explicitPresenter.getAvatarId() != null && !explicitPresenter.getAvatarId().isBlank()) {
+                    resolvedAvatar = explicitPresenter.getAvatarId();
+                } else {
+                    if (videoAvatarRepository != null) {
+                        resolvedAvatar = videoAvatarRepository.findByIsDefaultTrue()
+                                .map(VideoAvatarEntity::getAvatarId)
+                                .filter(id -> id != null && !id.isBlank())
+                                .orElse(null);
+                    }
+                    if (resolvedAvatar == null) {
+                        resolvedAvatar = presenterRepository.findByIsDefaultTrue()
+                                .map(PresenterProfileEntity::getAvatarId)
+                                .filter(id -> id != null && !id.isBlank())
+                                .orElse(null);
+                    }
+                    if (resolvedAvatar == null) {
+                        resolvedAvatar = "Aditya_public_1";
+                    }
+                }
 
                 avatarAsset = aiProviderService.generateAvatarVideo(
                         postId, null, post.getAvatarEngine(),
@@ -546,16 +610,30 @@ public class ContentPostService {
         GeneratedAssetEntity asset;
         if (scene.getSceneType() == SceneType.AVATAR) {
             log.info("Regenerating master avatar video for post {}...", postId);
-            PresenterProfileEntity presenter = null;
+            PresenterProfileEntity explicitPresenter = null;
             if (post.getPresenterId() != null) {
-                presenter = presenterRepository.findById(post.getPresenterId()).orElse(null);
+                explicitPresenter = presenterRepository.findById(post.getPresenterId()).orElse(null);
             }
-            if (presenter == null) {
-                presenter = presenterRepository.findByIsDefaultTrue().orElse(null);
+            String resolvedAvatar = null;
+            if (explicitPresenter != null && explicitPresenter.getAvatarId() != null && !explicitPresenter.getAvatarId().isBlank()) {
+                resolvedAvatar = explicitPresenter.getAvatarId();
+            } else {
+                if (videoAvatarRepository != null) {
+                    resolvedAvatar = videoAvatarRepository.findByIsDefaultTrue()
+                            .map(VideoAvatarEntity::getAvatarId)
+                            .filter(id -> id != null && !id.isBlank())
+                            .orElse(null);
+                }
+                if (resolvedAvatar == null) {
+                    resolvedAvatar = presenterRepository.findByIsDefaultTrue()
+                            .map(PresenterProfileEntity::getAvatarId)
+                            .filter(id -> id != null && !id.isBlank())
+                            .orElse(null);
+                }
+                if (resolvedAvatar == null) {
+                    resolvedAvatar = "Aditya_public_1";
+                }
             }
-            String resolvedAvatar = (presenter != null && presenter.getAvatarId() != null && !presenter.getAvatarId().isBlank())
-                    ? presenter.getAvatarId()
-                    : null;
 
             int totalDuration = post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45;
             asset = aiProviderService.generateAvatarVideo(
@@ -649,6 +727,122 @@ public class ContentPostService {
         post.setFinalRenderUrl(renderAsset.getStorageUrl());
         post.setThumbnailUrl(renderAsset.getStorageUrl());
         return postRepository.save(post);
+    }
+
+    /**
+     * Measure media duration using ffmpeg
+     */
+    public double probeMediaDuration(String mediaUrl) {
+        if (mediaUrl == null || mediaUrl.isBlank()) return 0;
+        try {
+            String ffmpeg = aiProviderService.findFfmpegBinary();
+            if (ffmpeg == null) return 0;
+            Path temp = Files.createTempFile("probe_", ".tmp");
+            try {
+                String s3Key = storageService.extractS3Key(mediaUrl);
+                if (s3Key != null && !s3Key.startsWith("http")) {
+                    byte[] bytes = storageService.getS3Object(s3Key);
+                    if (bytes != null && bytes.length > 0) {
+                        Files.write(temp, bytes);
+                    }
+                }
+                if (!Files.exists(temp) || Files.size(temp) == 0) {
+                    return 0;
+                }
+                ProcessBuilder pb = new ProcessBuilder(ffmpeg, "-i", temp.toAbsolutePath().toString());
+                pb.redirectErrorStream(true);
+                Process proc = pb.start();
+                String output = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                proc.waitFor(10, TimeUnit.SECONDS);
+
+                Matcher m = Pattern.compile("Duration:\\s*(\\d+):(\\d+):([\\d.]+)").matcher(output);
+                if (m.find()) {
+                    int hrs = Integer.parseInt(m.group(1));
+                    int mins = Integer.parseInt(m.group(2));
+                    double secs = Double.parseDouble(m.group(3));
+                    return hrs * 3600 + mins * 60 + secs;
+                }
+            } finally {
+                Files.deleteIfExists(temp);
+            }
+        } catch (Exception e) {
+            log.debug("probeMediaDuration notice: {}", e.getMessage());
+        }
+        return 0;
+    }
+
+    /**
+     * Synchronize scene start times and durations accurately based on spoken text word count
+     * and actual audio duration.
+     */
+    @Transactional
+    public List<ContentSceneEntity> syncSceneTimings(Long postId) {
+        ContentPostEntity post = postRepository.findById(postId).orElse(null);
+        if (post == null) return List.of();
+
+        List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
+        if (scenes.isEmpty()) return scenes;
+
+        double totalSeconds = post.getTargetDurationSeconds() != null && post.getTargetDurationSeconds() > 0
+                ? post.getTargetDurationSeconds()
+                : 45.0;
+
+        double probedDuration = probeMediaDuration(post.getVoiceAudioUrl());
+        if (probedDuration > 0) {
+            totalSeconds = probedDuration;
+        }
+
+        int totalWords = 0;
+        int[] wordCounts = new int[scenes.size()];
+        for (int i = 0; i < scenes.size(); i++) {
+            String text = scenes.get(i).getSpokenText();
+            int wc = (text != null && !text.isBlank()) ? text.trim().split("\\s+").length : 0;
+            wordCounts[i] = wc;
+            totalWords += wc;
+        }
+
+        int runningStart = 0;
+        for (int i = 0; i < scenes.size(); i++) {
+            ContentSceneEntity sc = scenes.get(i);
+            int dur;
+            if (totalWords > 0 && wordCounts[i] > 0) {
+                dur = (int) Math.round(((double) wordCounts[i] / totalWords) * totalSeconds);
+                if (dur < 3) dur = 3;
+            } else {
+                dur = sc.getDurationSeconds() != null ? sc.getDurationSeconds() : 5;
+            }
+
+            if (i == scenes.size() - 1 && totalSeconds > runningStart) {
+                dur = Math.max(dur, (int) Math.round(totalSeconds - runningStart));
+            }
+
+            sc.setStartTimeSeconds(runningStart);
+            sc.setDurationSeconds(dur);
+            sceneRepository.save(sc);
+            runningStart += dur;
+        }
+
+        log.info("Synchronized scene timings for post {}: total duration {}s across {} scenes.", postId, totalSeconds, scenes.size());
+        return scenes;
+    }
+
+    /**
+     * Update an individual scene's start time and duration directly
+     */
+    @Transactional
+    public ContentSceneEntity updateSceneTiming(Long postId, Integer sceneNumber, Integer startSeconds, Integer durationSeconds, String prompt) {
+        ContentSceneEntity scene = sceneRepository.findByPostIdAndSceneNumber(postId, sceneNumber)
+                .orElseThrow(() -> new IllegalArgumentException("Scene not found: " + sceneNumber));
+        if (startSeconds != null && startSeconds >= 0) {
+            scene.setStartTimeSeconds(startSeconds);
+        }
+        if (durationSeconds != null && durationSeconds > 0) {
+            scene.setDurationSeconds(durationSeconds);
+        }
+        if (prompt != null && !prompt.isBlank()) {
+            scene.setPrompt(prompt);
+        }
+        return sceneRepository.save(scene);
     }
 
     /**

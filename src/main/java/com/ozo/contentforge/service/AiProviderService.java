@@ -87,15 +87,18 @@ public class AiProviderService {
     private final MediaJobRepository mediaJobRepository;
     private final GenerationUsageRepository usageRepository;
     private final BackgroundAssetRepository backgroundRepository;
+    private final com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository;
 
     public AiProviderService(ObjectMapper objectMapper, StorageService storageService,
                              MediaJobRepository mediaJobRepository, GenerationUsageRepository usageRepository,
-                             BackgroundAssetRepository backgroundRepository) {
+                             BackgroundAssetRepository backgroundRepository,
+                             com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository) {
         this.objectMapper = objectMapper;
         this.storageService = storageService;
         this.mediaJobRepository = mediaJobRepository;
         this.usageRepository = usageRepository;
         this.backgroundRepository = backgroundRepository;
+        this.videoAvatarRepository = videoAvatarRepository;
     }
 
     private boolean isRealKey(String key) {
@@ -491,6 +494,268 @@ public class AiProviderService {
         return "talking_photo_" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    public String uploadHeyGenVideoAsset(byte[] videoBytes, String contentType, String filename) {
+        if (!isRealKey(heygenKey)) {
+            log.warn("HeyGen API key is unconfigured. Generating synthetic asset ID.");
+            return "asset_" + UUID.randomUUID().toString().substring(0, 8);
+        }
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+            org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
+            org.springframework.core.io.ByteArrayResource fileResource = new org.springframework.core.io.ByteArrayResource(videoBytes) {
+                @Override
+                public String getFilename() {
+                    return filename != null ? filename : "avatar_sample.mp4";
+                }
+            };
+            form.add("file", fileResource);
+
+            HttpEntity<org.springframework.util.MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(form, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity("https://api.heygen.com/v3/assets", requestEntity, String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+            log.info("HeyGen v3 asset upload response: {}", root);
+            if (root.has("data")) {
+                JsonNode data = root.get("data");
+                if (data.has("id")) return data.get("id").asText();
+                if (data.has("asset_id")) return data.get("asset_id").asText();
+            }
+        } catch (Exception e) {
+            log.warn("HeyGen video asset upload failed: {}. Falling back to synthetic asset ID.", e.getMessage());
+        }
+        return "asset_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    public Map<String, String> createHeyGenDigitalTwin(String name, String assetId) {
+        Map<String, String> result = new HashMap<>();
+        String safeName = (name != null && !name.isBlank()) ? name : "Instant Video Avatar";
+        result.put("name", safeName);
+
+        if (!isRealKey(heygenKey)) {
+            log.warn("HeyGen API key is unconfigured. Generating synthetic digital twin avatar.");
+            String syntheticId = "avatar_twin_" + UUID.randomUUID().toString().substring(0, 8);
+            result.put("avatar_id", syntheticId);
+            result.put("look_id", "look_" + UUID.randomUUID().toString().substring(0, 8));
+            result.put("group_id", "group_" + UUID.randomUUID().toString().substring(0, 8));
+            result.put("status", "COMPLETED");
+            return result;
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("type", "digital_twin");
+            body.put("name", safeName);
+            body.put("file", Map.of(
+                    "type", "asset_id",
+                    "asset_id", assetId
+            ));
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity("https://api.heygen.com/v3/avatars", entity, String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+            log.info("HeyGen digital twin creation response: {}", root);
+
+            if (root.has("error") && !root.get("error").isNull()) {
+                String errorMsg = root.get("error").has("message") ? root.get("error").get("message").asText() : root.get("error").toString();
+                result.put("status", "FAILED");
+                result.put("error", errorMsg);
+                return result;
+            }
+
+            JsonNode data = root.path("data");
+            String lookId = data.path("look_id").asText(null);
+            String avatarId = data.path("avatar_id").asText(null);
+            String groupId = data.path("avatar_group_id").asText(null);
+            String previewImageUrl = null;
+            String consentStatus = null;
+
+            if (data.has("avatar_group")) {
+                JsonNode groupNode = data.path("avatar_group");
+                if (groupId == null || groupId.isBlank()) {
+                    groupId = groupNode.path("id").asText(null);
+                }
+                consentStatus = groupNode.path("consent_status").asText(null);
+                if (consentStatus == null || consentStatus.isBlank()) {
+                    consentStatus = groupNode.path("status").asText(null);
+                }
+                previewImageUrl = groupNode.path("preview_image_url").asText(null);
+            }
+
+            if (data.has("avatar_item")) {
+                JsonNode itemNode = data.path("avatar_item");
+                if (lookId == null || lookId.isBlank()) {
+                    lookId = itemNode.path("id").asText(null);
+                }
+                if (avatarId == null || avatarId.isBlank()) {
+                    avatarId = itemNode.path("id").asText(null);
+                }
+                if (previewImageUrl == null || previewImageUrl.isBlank()) {
+                    previewImageUrl = itemNode.path("preview_image_url").asText(null);
+                }
+            }
+
+            if (avatarId == null || avatarId.isBlank()) {
+                avatarId = data.path("id").asText(null);
+            }
+            if (lookId == null || lookId.isBlank()) {
+                lookId = data.path("id").asText(null);
+            }
+            if (avatarId == null || avatarId.isBlank()) {
+                avatarId = lookId != null ? lookId : "avatar_" + UUID.randomUUID().toString().substring(0, 8);
+            }
+
+            result.put("look_id", lookId);
+            result.put("avatar_id", avatarId);
+            result.put("group_id", groupId);
+            result.put("preview_image_url", previewImageUrl);
+            result.put("consent_status", consentStatus);
+
+            if ("pending".equalsIgnoreCase(consentStatus) || "pending_consent".equalsIgnoreCase(consentStatus)) {
+                result.put("status", "PENDING_CONSENT");
+            } else {
+                result.put("status", "PROCESSING");
+            }
+            return result;
+        } catch (Exception e) {
+            log.error("HeyGen digital twin creation failed: {}", e.getMessage());
+            result.put("status", "FAILED");
+            result.put("error", e.getMessage());
+            result.put("avatar_id", "avatar_twin_" + UUID.randomUUID().toString().substring(0, 8));
+            return result;
+        }
+    }
+
+    public Map<String, String> getHeyGenConsentSession(String groupId) {
+        Map<String, String> result = new HashMap<>();
+        if (!isRealKey(heygenKey) || groupId == null || groupId.isBlank()) {
+            return result;
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> entity = new HttpEntity<>("{}", headers);
+
+            String url = "https://api.heygen.com/v3/avatars/" + groupId + "/consent";
+            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+
+            JsonNode data = root.path("data");
+            String consentUrl = data.path("url").asText(null);
+            String consentStatus = data.path("avatar_group").path("consent_status").asText("pending");
+
+            result.put("url", consentUrl);
+            result.put("consent_status", consentStatus);
+            result.put("group_id", groupId);
+            return result;
+        } catch (Exception e) {
+            log.warn("Failed to get HeyGen consent session for groupId {}: {}", groupId, e.getMessage());
+            result.put("error", e.getMessage());
+            return result;
+        }
+    }
+
+    public Map<String, String> checkHeyGenDigitalTwinStatus(String lookId, String groupId) {
+        Map<String, String> result = new HashMap<>();
+        if (!isRealKey(heygenKey)) {
+            result.put("status", "COMPLETED");
+            return result;
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            HttpEntity<Void> entity = new HttpEntity<>(headers);
+
+            // 1. If groupId exists, check group consent and lifecycle
+            if (groupId != null && !groupId.isBlank()) {
+                try {
+                    String groupUrl = "https://api.heygen.com/v3/avatars/" + groupId;
+                    ResponseEntity<String> groupResp = restTemplate.exchange(groupUrl, HttpMethod.GET, entity, String.class);
+                    if (groupResp.getStatusCode().is2xxSuccessful() && groupResp.getBody() != null) {
+                        JsonNode groupRoot = objectMapper.readTree(groupResp.getBody());
+                        JsonNode groupData = groupRoot.path("data");
+                        String consentStatus = groupData.path("consent_status").asText(null);
+                        String groupStatus = groupData.path("status").asText(null);
+                        String previewUrl = groupData.path("preview_image_url").asText(null);
+
+                        if (previewUrl != null && !previewUrl.isBlank()) {
+                            result.put("thumbnailUrl", previewUrl);
+                        }
+                        if (consentStatus != null) {
+                            result.put("consent_status", consentStatus);
+                        }
+
+                        if ("pending".equalsIgnoreCase(consentStatus) || "pending_consent".equalsIgnoreCase(groupStatus)) {
+                            result.put("status", "PENDING_CONSENT");
+                            result.put("statusMessage", "HeyGen requires verbal consent verification before activating this digital twin.");
+                            return result;
+                        }
+                    }
+                } catch (Exception groupEx) {
+                    log.debug("Avatar group check notice: {}", groupEx.getMessage());
+                }
+            }
+
+            // 2. If lookId exists, check look rendering status
+            if (lookId != null && !lookId.isBlank() && !lookId.startsWith("look_")) {
+                String url = "https://api.heygen.com/v3/avatars/looks/" + lookId;
+                ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+                JsonNode root = objectMapper.readTree(response.getBody());
+
+                JsonNode data = root.path("data");
+                String status = data.path("status").asText("PROCESSING").toUpperCase();
+                String avatarId = data.path("avatar_id").asText(null);
+                if (avatarId == null || avatarId.isBlank()) {
+                    avatarId = data.path("id").asText(lookId);
+                }
+
+                if (data.has("error") && !data.path("error").isMissingNode()) {
+                    JsonNode errNode = data.path("error");
+                    String errMsg = errNode.has("message") ? errNode.path("message").asText() : errNode.asText();
+                    result.put("error", errMsg);
+                }
+
+                result.put("status", status);
+                result.put("avatar_id", avatarId);
+                return result;
+            }
+
+            result.put("status", "PROCESSING");
+            return result;
+        } catch (Exception e) {
+            log.warn("Check HeyGen digital twin status failed for lookId {} / groupId {}: {}", lookId, groupId, e.getMessage());
+            result.put("status", "PROCESSING");
+            result.put("error", e.getMessage());
+            return result;
+        }
+    }
+
+    public boolean deleteHeyGenAvatarGroup(String groupId) {
+        if (!isRealKey(heygenKey) || groupId == null || groupId.isBlank()) {
+            return false;
+        }
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            HttpEntity<Void> entity = new HttpEntity<>(headers);
+            String url = "https://api.heygen.com/v3/avatars/" + groupId;
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.DELETE, entity, String.class);
+            log.info("HeyGen delete avatar group {} response status: {}", groupId, response.getStatusCode());
+            return response.getStatusCode().is2xxSuccessful();
+        } catch (Exception e) {
+            log.warn("Failed to delete HeyGen avatar group {}: {}", groupId, e.getMessage());
+            return false;
+        }
+    }
+
     // =========================================================================
     // 3. HEYGEN: AVATAR GENERATION (ADAPTER: AVATAR III / AVATAR IV)
     // =========================================================================
@@ -506,73 +771,112 @@ public class AiProviderService {
         double ratePerSec = (engine == AvatarEngine.AVATAR_III) ? (1.0 / 60.0) : (4.0 / 60.0);
         double cost = durationSeconds * ratePerSec;
 
+        // 1. Check if an existing HeyGen videoId was already completed or in-progress for this post
+        String videoId = null;
+        List<MediaJobEntity> previousJobs = mediaJobRepository.findByPostIdOrderByStartedAtDesc(postId);
+        for (MediaJobEntity mj : previousJobs) {
+            if (mj.getProvider() == JobProvider.HEYGEN) {
+                String candidateId = null;
+                if (mj.getProviderTaskId() != null && !mj.getProviderTaskId().isBlank() && !mj.getProviderTaskId().startsWith("task_")) {
+                    candidateId = mj.getProviderTaskId();
+                } else if (mj.getErrorJson() != null && mj.getErrorJson().contains("videoId: ")) {
+                    String part = mj.getErrorJson().substring(mj.getErrorJson().indexOf("videoId: ") + 9).trim();
+                    if (!part.isBlank()) {
+                        candidateId = part.split("[^a-zA-Z0-9_]")[0];
+                    }
+                }
+
+                if (candidateId != null && !candidateId.isBlank()) {
+                    String candidateStatus = checkHeyGenVideoStatus(candidateId);
+                    if ("completed".equalsIgnoreCase(candidateStatus) || "done".equalsIgnoreCase(candidateStatus) || "success".equalsIgnoreCase(candidateStatus)) {
+                        log.info("Found completed HeyGen videoId '{}' for post {}. Reusing finished render!", candidateId, postId);
+                        videoId = candidateId;
+                        break;
+                    } else if ("processing".equalsIgnoreCase(candidateStatus) || "waiting".equalsIgnoreCase(candidateStatus) || "pending".equalsIgnoreCase(candidateStatus)) {
+                        log.info("Found actively rendering HeyGen videoId '{}' for post {}. Continuing async wait...", candidateId, postId);
+                        videoId = candidateId;
+                        break;
+                    } else {
+                        log.warn("Previous HeyGen videoId '{}' is in failed/invalid state on server ({}). Discarding and generating fresh video.", candidateId, candidateStatus);
+                    }
+                }
+            }
+        }
+
         try {
-            String targetUrl = (heygenV2Url != null && !heygenV2Url.isEmpty()) ? heygenV2Url : "https://api.heygen.com/v2/video/generate";
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("X-Api-Key", heygenKey);
-            headers.setContentType(MediaType.APPLICATION_JSON);
+            // Only submit a new generation request if no valid completed or in-progress videoId exists
+            if (videoId == null) {
+                String targetUrl = (heygenV2Url != null && !heygenV2Url.isEmpty()) ? heygenV2Url : "https://api.heygen.com/v2/video/generate";
+                HttpHeaders headers = new HttpHeaders();
+                headers.set("X-Api-Key", heygenKey);
+                headers.setContentType(MediaType.APPLICATION_JSON);
 
-            Map<String, Object> characterMap = new HashMap<>();
-            if (avatarId == null || avatarId.isBlank()) {
-                throw new IllegalStateException("Presenter avatar ID is missing or unconfigured.");
-            }
+                Map<String, Object> characterMap = new HashMap<>();
+                if (avatarId == null || avatarId.isBlank()) {
+                    throw new IllegalStateException("Presenter avatar ID is missing or unconfigured.");
+                }
 
-            if (avatarId.contains("photo") || avatarId.matches("^[a-f0-9]{32}$") || avatarId.length() >= 25) {
-                characterMap.put("type", "talking_photo");
-                characterMap.put("talking_photo_id", avatarId);
-                log.info("Using dynamic HeyGen talking photo ID: '{}'", avatarId);
-            } else {
-                characterMap.put("type", "avatar");
-                characterMap.put("avatar_id", avatarId);
-                characterMap.put("avatar_style", "normal");
-                log.info("Using dynamic HeyGen avatar ID: '{}'", avatarId);
-            }
+                boolean isKnownVideoAvatar = videoAvatarRepository != null && videoAvatarRepository.existsByAvatarId(avatarId);
+                boolean isExplicitPhoto = avatarId.contains("photo") || avatarId.startsWith("talking_photo_");
+                boolean isTalkingPhoto = !isKnownVideoAvatar && (isExplicitPhoto || (avatarId.matches("^[a-f0-9]{32}$") && !avatarId.contains("_")));
 
-            // Direct ElevenLabs Audio Lip-Sync (No double generation, no voiceId needed)
-            Map<String, Object> voiceMap = new HashMap<>();
-            if (voiceAudioUrl != null && !voiceAudioUrl.isBlank()) {
-                voiceMap.put("type", "audio");
-                // Generate authentic, presigned S3 URL on demand for HeyGen cloud ingestion
-                String externalAudioUrl = storageService.getPresignedUrl(voiceAudioUrl, Duration.ofHours(24));
-                voiceMap.put("audio_url", externalAudioUrl);
-            } else {
-                voiceMap.put("type", "text");
-                voiceMap.put("input_text", (spokenText != null && !spokenText.isBlank()) ? spokenText : "Hello, welcome.");
-                voiceMap.put("voice_id", "1bd801e7e50f4715b92c10829a6e3b3e");
-            }
+                if (isTalkingPhoto) {
+                    characterMap.put("type", "talking_photo");
+                    characterMap.put("talking_photo_id", avatarId);
+                    log.info("Using dynamic HeyGen talking photo ID: '{}'", avatarId);
+                } else {
+                    characterMap.put("type", "avatar");
+                    characterMap.put("avatar_id", avatarId);
+                    characterMap.put("avatar_style", "normal");
+                    log.info("Using dynamic HeyGen live video avatar ID: '{}' (hand gestures & body movement enabled)", avatarId);
+                }
 
-            Map<String, Object> input = new HashMap<>();
-            input.put("character", characterMap);
-            input.put("voice", voiceMap);
+                // Direct ElevenLabs Audio Lip-Sync (No double generation, no voiceId needed)
+                Map<String, Object> voiceMap = new HashMap<>();
+                if (voiceAudioUrl != null && !voiceAudioUrl.isBlank()) {
+                    voiceMap.put("type", "audio");
+                    String externalAudioUrl = storageService.getPresignedUrl(voiceAudioUrl, Duration.ofHours(24));
+                    voiceMap.put("audio_url", externalAudioUrl);
+                } else {
+                    voiceMap.put("type", "text");
+                    voiceMap.put("input_text", (spokenText != null && !spokenText.isBlank()) ? spokenText : "Hello, welcome.");
+                    voiceMap.put("voice_id", "1bd801e7e50f4715b92c10829a6e3b3e");
+                }
 
-            // Dynamic Background Injection ($0 extra cost)
-            Optional<BackgroundAssetEntity> defaultBg = backgroundRepository.findByIsDefaultTrue();
-            if (defaultBg.isPresent()) {
-                String bgType = defaultBg.get().getMediaType().equalsIgnoreCase("VIDEO") ? "video" : "image";
-                String externalBgUrl = storageService.getPresignedUrl(defaultBg.get().getStorageUrl(), Duration.ofHours(24));
-                input.put("background", Map.of(
-                        "type", bgType,
-                        "url", externalBgUrl
-                ));
-                log.info("Injected gallery background '{}' ({}) into HeyGen avatar scene", defaultBg.get().getName(), bgType);
-            }
+                Map<String, Object> input = new HashMap<>();
+                input.put("character", characterMap);
+                input.put("voice", voiceMap);
 
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("video_inputs", List.of(input));
-            payload.put("dimension", Map.of("width", 720, "height", 1280));
+                // Dynamic Background Injection
+                Optional<BackgroundAssetEntity> defaultBg = backgroundRepository.findByIsDefaultTrue();
+                if (defaultBg.isPresent()) {
+                    String bgType = defaultBg.get().getMediaType().equalsIgnoreCase("VIDEO") ? "video" : "image";
+                    String externalBgUrl = storageService.getPresignedUrl(defaultBg.get().getStorageUrl(), Duration.ofHours(24));
+                    input.put("background", Map.of(
+                            "type", bgType,
+                            "url", externalBgUrl
+                    ));
+                    log.info("Injected gallery background '{}' ({}) into HeyGen avatar scene", defaultBg.get().getName(), bgType);
+                }
 
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(targetUrl, entity, String.class);
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("video_inputs", List.of(input));
+                payload.put("dimension", Map.of("width", 720, "height", 1280));
 
-            JsonNode root = objectMapper.readTree(response.getBody());
-            if (root.has("error") && !root.get("error").isNull()) {
-                String errorMsg = root.get("error").isTextual() ? root.get("error").asText() : root.get("error").toString();
-                throw new RuntimeException("HeyGen API Error: " + errorMsg);
-            }
+                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
+                ResponseEntity<String> response = restTemplate.postForEntity(targetUrl, entity, String.class);
 
-            String videoId = null;
-            if (root.has("data") && root.get("data").has("video_id")) {
-                videoId = root.get("data").get("video_id").asText();
+                JsonNode root = objectMapper.readTree(response.getBody());
+                if (root.has("error") && !root.get("error").isNull()) {
+                    String errorMsg = root.get("error").isTextual() ? root.get("error").asText() : root.get("error").toString();
+                    throw new RuntimeException("HeyGen API Error: " + errorMsg);
+                }
+
+                if (root.has("data") && root.get("data").has("video_id")) {
+                    videoId = root.get("data").get("video_id").asText();
+                    job.setProviderTaskId(videoId);
+                    mediaJobRepository.save(job);
+                }
             }
 
             completeJob(job, cost);
@@ -581,7 +885,8 @@ public class AiProviderService {
             String videoUrl = "https://app.heygen.com/share/" + (videoId != null ? videoId : "video_" + System.currentTimeMillis());
             String realMp4Url = null;
             if (videoId != null && !videoId.startsWith("video_")) {
-                realMp4Url = pollHeyGenVideoUrl(videoId, 240);
+                // Poll asynchronously without artificial timeout — wait until completed or explicitly failed
+                realMp4Url = pollHeyGenVideoUrl(videoId);
                 if (realMp4Url != null && !realMp4Url.isBlank()) {
                     try {
                         byte[] videoBytes = restTemplate.getForObject(realMp4Url, byte[].class);
@@ -599,7 +904,7 @@ public class AiProviderService {
                         }
                     }
                 } else {
-                    throw new RuntimeException("HeyGen video generation timed out or failed to produce video URL for videoId: " + videoId);
+                    throw new RuntimeException("HeyGen video generation failed to produce video URL for videoId: " + videoId);
                 }
             }
 
@@ -626,18 +931,41 @@ public class AiProviderService {
         }
     }
 
-    public String pollHeyGenVideoUrl(String videoId, int maxWaitSeconds) {
+    public String checkHeyGenVideoStatus(String videoId) {
         if (!isRealKey(heygenKey) || videoId == null || videoId.isBlank() || videoId.startsWith("video_")) {
             return null;
         }
-        log.info("Polling HeyGen video status for videoId: {}...", videoId);
+        try {
+            String url = (heygenStatusUrl != null && !heygenStatusUrl.isBlank())
+                    ? heygenStatusUrl + "?video_id=" + videoId
+                    : "https://api.heygen.com/v1/video_status.get?video_id=" + videoId;
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-Api-Key", heygenKey);
+            HttpEntity<Void> entity = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                JsonNode root = objectMapper.readTree(response.getBody());
+                return root.path("data").path("status").asText();
+            }
+        } catch (Exception e) {
+            log.debug("Error checking single status for {}: {}", videoId, e.getMessage());
+        }
+        return null;
+    }
+
+    public String pollHeyGenVideoUrl(String videoId) {
+        if (!isRealKey(heygenKey) || videoId == null || videoId.isBlank() || videoId.startsWith("video_")) {
+            return null;
+        }
+        log.info("Polling HeyGen video status asynchronously for videoId: {}...", videoId);
         long startTime = System.currentTimeMillis();
-        long maxWaitMillis = maxWaitSeconds * 1000L;
+        // Generous safety ceiling (60 minutes) to avoid infinite loop only if HeyGen server completely loses record
+        long maxSafetyMillis = 3600 * 1000L;
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-Api-Key", heygenKey);
         HttpEntity<Void> entity = new HttpEntity<>(headers);
 
-        while (System.currentTimeMillis() - startTime < maxWaitMillis) {
+        while (System.currentTimeMillis() - startTime < maxSafetyMillis) {
             try {
                 String url = (heygenStatusUrl != null && !heygenStatusUrl.isBlank())
                         ? heygenStatusUrl + "?video_id=" + videoId
@@ -653,21 +981,34 @@ public class AiProviderService {
                             log.info("HeyGen video {} completed successfully: {}", videoId, realUrl);
                             return realUrl;
                         }
-                    } else if ("failed".equalsIgnoreCase(status)) {
+                    } else if ("failed".equalsIgnoreCase(status) || "error".equalsIgnoreCase(status)) {
                         JsonNode errNode = dataNode.path("error");
                         String errDetail = errNode.isTextual() ? errNode.asText() : errNode.toString();
-                        log.error("HeyGen video {} failed on server: {}", videoId, errDetail);
-                        return null;
+                        log.error("HeyGen video {} explicitly failed on server: {}", videoId, errDetail);
+                        throw new RuntimeException("HeyGen video processing failed on server: " + errDetail);
+                    } else {
+                        // Actively rendering/processing/queued — wait asynchronously without timing out
+                        long elapsedSec = (System.currentTimeMillis() - startTime) / 1000;
+                        if (elapsedSec % 20 == 0) {
+                            log.info("HeyGen video {} is currently '{}' (elapsed: {}s). Waiting for completion...", videoId, status, elapsedSec);
+                        }
                     }
                 }
+            } catch (RuntimeException re) {
+                if (re.getMessage() != null && re.getMessage().startsWith("HeyGen video processing failed")) {
+                    throw re;
+                }
+                log.debug("HeyGen status polling notice: {}", re.getMessage());
             } catch (Exception e) {
                 log.debug("HeyGen status polling notice: {}", e.getMessage());
             }
+
             try {
-                Thread.sleep(4000);
+                Thread.sleep(5000);
             } catch (InterruptedException ignored) {}
         }
-        log.warn("HeyGen video {} polling timed out after {}s", videoId, maxWaitSeconds);
+
+        log.warn("HeyGen video {} polling reached 60-minute safety ceiling without completion", videoId);
         return null;
     }
 
@@ -891,7 +1232,7 @@ public class AiProviderService {
                 .build();
     }
 
-    private String findFfmpegBinary() {
+    public String findFfmpegBinary() {
         File projectBin = new File("c:\\projects\\cf\\bin\\ffmpeg.exe");
         if (projectBin.exists() && projectBin.canExecute()) {
             return projectBin.getAbsolutePath();
@@ -951,7 +1292,7 @@ public class AiProviderService {
                 int start = sc.getStartTimeSeconds() != null ? sc.getStartTimeSeconds() : (10 + i * 15);
                 int end = start + (sc.getDurationSeconds() != null ? sc.getDurationSeconds() : 5);
                 String nextOut = (i == brolls.size() - 1) ? "[outv]" : "[v" + (i + 1) + "]";
-                filter.append(String.format("%s[b%d]overlay=0:0:enable='between(t,%d,%d)'%s",
+                filter.append(String.format("%s[b%d]overlay=0:0:enable='between(t,%d,%d)':eof_action=repeat%s",
                         currentBase, i + 1, start, end, nextOut));
                 if (i < brolls.size() - 1) filter.append(";");
                 currentBase = nextOut;

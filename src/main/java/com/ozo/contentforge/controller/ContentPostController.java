@@ -102,6 +102,11 @@ public class ContentPostController {
         return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer));
     }
 
+    @PostMapping("/{id}/retry-media")
+    public ResponseEntity<ContentPostEntity> retryMediaGeneration(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(postService.retryMediaGeneration(id));
+    }
+
     @PostMapping("/{id}/regenerate-scene")
     public ResponseEntity<ContentSceneEntity> regenerateScene(@PathVariable("id") Long id,
                                                               @RequestBody Map<String, Object> body) throws Exception {
@@ -113,6 +118,24 @@ public class ContentPostController {
     @PostMapping("/{id}/remerge")
     public ResponseEntity<ContentPostEntity> remergeVideo(@PathVariable("id") Long id) throws Exception {
         return ResponseEntity.ok(postService.remergeVideo(id));
+    }
+
+    @PutMapping("/{id}/scenes/{sceneNumber}")
+    public ResponseEntity<ContentSceneEntity> updateSceneTiming(
+            @PathVariable("id") Long id,
+            @PathVariable("sceneNumber") Integer sceneNumber,
+            @RequestBody Map<String, Object> body) {
+        Integer startSeconds = body.containsKey("startTimeSeconds") && body.get("startTimeSeconds") != null
+                ? ((Number) body.get("startTimeSeconds")).intValue() : null;
+        Integer durationSeconds = body.containsKey("durationSeconds") && body.get("durationSeconds") != null
+                ? ((Number) body.get("durationSeconds")).intValue() : null;
+        String prompt = body.containsKey("prompt") ? (String) body.get("prompt") : null;
+        return ResponseEntity.ok(postService.updateSceneTiming(id, sceneNumber, startSeconds, durationSeconds, prompt));
+    }
+
+    @PostMapping("/{id}/sync-scene-timings")
+    public ResponseEntity<List<ContentSceneEntity>> syncSceneTimings(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(postService.syncSceneTimings(id));
     }
 
     @PostMapping("/{id}/approve-media")

@@ -4,6 +4,7 @@ import com.ozo.contentforge.model.entity.GeneratedAssetEntity;
 import com.ozo.contentforge.model.entity.PresenterProfileEntity;
 import com.ozo.contentforge.model.enums.AssetType;
 import com.ozo.contentforge.repository.PresenterProfileRepository;
+import com.ozo.contentforge.repository.VideoAvatarRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -16,13 +17,16 @@ import java.util.Optional;
 public class PresenterProfileService {
 
     private final PresenterProfileRepository presenterRepository;
+    private final VideoAvatarRepository videoAvatarRepository;
     private final StorageService storageService;
     private final AiProviderService aiProviderService;
 
     public PresenterProfileService(PresenterProfileRepository presenterRepository,
+                                  VideoAvatarRepository videoAvatarRepository,
                                   StorageService storageService,
                                   AiProviderService aiProviderService) {
         this.presenterRepository = presenterRepository;
+        this.videoAvatarRepository = videoAvatarRepository;
         this.storageService = storageService;
         this.aiProviderService = aiProviderService;
     }
@@ -143,10 +147,21 @@ public class PresenterProfileService {
 
     @Transactional
     public void setDefaultPresenter(Long id) {
+        // 1. Set this presenter as default, unset other presenters
         presenterRepository.findAll().forEach(p -> {
             p.setIsDefault(p.getId().equals(id));
             presenterRepository.save(p);
         });
+
+        // 2. Unset all video avatars so ONLY ONE active default exists across the whole platform
+        if (videoAvatarRepository != null) {
+            videoAvatarRepository.findAll().forEach(v -> {
+                if (Boolean.TRUE.equals(v.getIsDefault())) {
+                    v.setIsDefault(false);
+                    videoAvatarRepository.save(v);
+                }
+            });
+        }
     }
 
     @Transactional
