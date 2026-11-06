@@ -390,48 +390,67 @@ public class AiProviderService {
         log.info("Generating ElevenLabs voice audio for post {}...", postId);
         MediaJobEntity job = recordJob(postId, null, JobProvider.ELEVENLABS, "GENERATE_VOICE");
 
-        // Cost estimation: ~$0.0003 per character
         int charCount = text != null ? text.length() : 300;
         double cost = charCount * 0.0003;
 
-        if (isRealKey(elevenLabsKey) && voiceId != null && !voiceId.isEmpty()) {
-            try {
-                HttpHeaders headers = new HttpHeaders();
-                headers.set("xi-api-key", elevenLabsKey);
-                headers.setContentType(MediaType.APPLICATION_JSON);
+        String effectiveVoiceId = (voiceId != null && !voiceId.isBlank() && !voiceId.startsWith("el_"))
+                ? voiceId
+                : "rRAzMEZ6U57ivzmuPBhL"; // Default Amit Singh Yadav cloned voice
 
-                Map<String, Object> body = Map.of(
-                        "text", text,
-                        "model_id", elevenLabsModel,
-                        "voice_settings", Map.of(
-                                "stability", 0.45,
-                                "similarity_boost", 0.88,
-                                "style", 0.10,
-                                "use_speaker_boost", true
-                        )
-                );
+        if (isRealKey(elevenLabsKey)) {
+            byte[] audioBytes = callElevenLabsTts(text, effectiveVoiceId);
+            if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
+                log.warn("ElevenLabs TTS failed for voice '{}'. Retrying with verified default voice 'rRAzMEZ6U57ivzmuPBhL' (Amit Singh Yadav)...", effectiveVoiceId);
+                audioBytes = callElevenLabsTts(text, "rRAzMEZ6U57ivzmuPBhL");
+            }
 
-                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-                ResponseEntity<byte[]> response = restTemplate.postForEntity(
-                        elevenLabsBaseUrl + "/text-to-speech/" + voiceId, entity, byte[].class
-                );
-
-                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                    completeJob(job, cost);
-                    recordUsage(postId, "ELEVENLABS", elevenLabsModel, (double) charCount, "CHARACTERS", cost);
-                    return storageService.saveGeneratedMedia(response.getBody(), ".mp3", "audio/mpeg", AssetType.AUDIO, postId, null, 45.0, "{\"provider\": \"ElevenLabs\"}");
-                }
-            } catch (Exception e) {
-                log.warn("ElevenLabs TTS failed ({}), producing high fidelity audio asset.", e.getMessage());
+            if (audioBytes != null && audioBytes.length > 500) {
+                completeJob(job, cost);
+                recordUsage(postId, "ELEVENLABS", elevenLabsModel, (double) charCount, "CHARACTERS", cost);
+                return storageService.saveGeneratedMedia(audioBytes, ".mp3", "audio/mpeg", AssetType.AUDIO, postId, null, 45.0, "{\"provider\": \"ElevenLabs\"}");
             }
         }
 
-        // Generate synthetic audio waveform / audio file asset
-        byte[] dummyAudio = ("CONTENTFORGE_AUDIO_SAMPLE_" + System.currentTimeMillis() + "_" + (text != null ? text.hashCode() : 0)).getBytes();
-        GeneratedAssetEntity asset = storageService.saveGeneratedMedia(dummyAudio, ".mp3", "audio/mpeg", AssetType.AUDIO, postId, null, 45.0, "{\"synthetic\": true, \"charCount\": " + charCount + "}");
-        completeJob(job, cost);
-        recordUsage(postId, "ELEVENLABS", elevenLabsModel, (double) charCount, "CHARACTERS", cost);
-        return asset;
+        job.setStatus(JobStatus.FAILED);
+        job.setErrorJson("ElevenLabs TTS failed to generate audio for voice ID: " + voiceId);
+        mediaJobRepository.save(job);
+        throw new IllegalStateException("ElevenLabs TTS failed to generate valid audio for voice ID: " + voiceId);
+    }
+
+    private byte[] callElevenLabsTts(String text, String voiceId) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("xi-api-key", elevenLabsKey);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            boolean isPvc = (voiceId != null && (voiceId.startsWith("el_pvc_") || voiceId.contains("pvc")));
+            double stability = isPvc ? 0.50 : 0.45;
+            double similarity = isPvc ? 0.95 : 0.88;
+            double style = isPvc ? 0.15 : 0.10;
+
+            Map<String, Object> body = Map.of(
+                    "text", text,
+                    "model_id", elevenLabsModel,
+                    "voice_settings", Map.of(
+                            "stability", stability,
+                            "similarity_boost", similarity,
+                            "style", style,
+                            "use_speaker_boost", true
+                    )
+            );
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+            ResponseEntity<byte[]> response = restTemplate.postForEntity(
+                    elevenLabsBaseUrl + "/text-to-speech/" + voiceId, entity, byte[].class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null && response.getBody().length > 500) {
+                return response.getBody();
+            }
+        } catch (Exception e) {
+            log.warn("ElevenLabs TTS call failed for voiceId '{}': {}", voiceId, e.getMessage());
+        }
+        return null;
     }
 
     public String cloneElevenLabsVoice(String name, byte[] audioBytes, String filename, String description) {
@@ -462,12 +481,97 @@ public class AiProviderService {
             ResponseEntity<String> response = restTemplate.postForEntity(elevenLabsBaseUrl + "/voices/add", entity, String.class);
             JsonNode root = objectMapper.readTree(response.getBody());
             if (root.has("voice_id")) {
-                return root.get("voice_id").asText();
+                String vid = root.get("voice_id").asText();
+                log.info("ElevenLabs voice created successfully with ID: {}", vid);
+                return vid;
             }
+            throw new RuntimeException("ElevenLabs did not return a voice_id: " + response.getBody());
         } catch (Exception e) {
-            log.warn("ElevenLabs voice cloning failed: {}. Using generated ID.", e.getMessage());
+            String errorMsg = extractElevenLabsErrorMessage(e);
+            log.error("ElevenLabs voice cloning failed: {}", errorMsg);
+            throw new RuntimeException("ElevenLabs Voice Cloning Failed: " + errorMsg, e);
         }
-        return "el_voice_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    public String cloneElevenLabsPvcVoice(String name, byte[] audioBytes, String filename, String description,
+                                          byte[] consentBytes, String consentFilename) {
+        log.info("Initiating ElevenLabs voice clone for '{}' (sample size: {} bytes)...",
+                name, audioBytes != null ? audioBytes.length : 0);
+        if (!isRealKey(elevenLabsKey)) {
+            throw new IllegalStateException("ElevenLabs API key is unconfigured. Please configure 'elevenlabs.api.key' in Master Settings.");
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("xi-api-key", elevenLabsKey);
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+            org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
+            form.add("name", (name != null && !name.isBlank()) ? name : "Cloned Voice " + UUID.randomUUID().toString().substring(0, 4));
+            if (description != null && !description.isBlank()) {
+                form.add("description", description);
+            } else {
+                form.add("description", "High-fidelity voice clone trained via ContentForge");
+            }
+
+            if (audioBytes != null && audioBytes.length > 0) {
+                org.springframework.core.io.ByteArrayResource fileResource = new org.springframework.core.io.ByteArrayResource(audioBytes) {
+                    @Override
+                    public String getFilename() {
+                        return filename != null ? filename : "studio_sample.mp3";
+                    }
+                };
+                form.add("files", fileResource);
+            }
+
+            // In ElevenLabs /voices/add, all audio samples are attached under "files"
+            if (consentBytes != null && consentBytes.length > 0) {
+                org.springframework.core.io.ByteArrayResource consentResource = new org.springframework.core.io.ByteArrayResource(consentBytes) {
+                    @Override
+                    public String getFilename() {
+                        return consentFilename != null ? consentFilename : "pvc_consent.mp3";
+                    }
+                };
+                form.add("files", consentResource);
+            }
+
+            String targetUrl = elevenLabsBaseUrl + "/voices/add";
+            HttpEntity<org.springframework.util.MultiValueMap<String, Object>> entity = new HttpEntity<>(form, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(targetUrl, entity, String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+            if (root.has("voice_id")) {
+                String vid = root.get("voice_id").asText();
+                log.info("ElevenLabs voice clone created successfully with ID: {}", vid);
+                return vid;
+            }
+            throw new RuntimeException("ElevenLabs did not return a voice_id: " + response.getBody());
+        } catch (Exception e) {
+            String errorMsg = extractElevenLabsErrorMessage(e);
+            log.error("ElevenLabs voice cloning failed: {}", errorMsg);
+            throw new RuntimeException("ElevenLabs Voice Cloning Failed: " + errorMsg, e);
+        }
+    }
+
+    public String extractElevenLabsErrorMessage(Exception e) {
+        if (e instanceof org.springframework.web.client.HttpStatusCodeException httpEx) {
+            String body = httpEx.getResponseBodyAsString();
+            try {
+                JsonNode root = objectMapper.readTree(body);
+                if (root.has("detail")) {
+                    JsonNode detail = root.get("detail");
+                    if (detail.isObject() && detail.has("message")) {
+                        return detail.get("message").asText();
+                    } else if (detail.isTextual()) {
+                        return detail.asText();
+                    }
+                }
+                if (root.has("message")) {
+                    return root.get("message").asText();
+                }
+            } catch (Exception ignored) {}
+            return "HTTP " + httpEx.getStatusCode().value() + ": " + body;
+        }
+        return e.getMessage() != null ? e.getMessage() : "Unknown ElevenLabs error";
     }
 
     public String uploadHeyGenTalkingPhoto(byte[] photoBytes, String contentType, String filename) {

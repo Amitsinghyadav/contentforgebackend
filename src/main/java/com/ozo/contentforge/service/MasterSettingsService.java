@@ -109,6 +109,12 @@ public class MasterSettingsService {
         s.put("brollOutputRatio", "9:16");
         s.put("subtitlesEnabled", true);
 
+        // Voice Cloning & Audio (ElevenLabs PVC)
+        s.put("defaultVoiceTier", "INSTANT"); // "INSTANT" (IVC) or "PROFESSIONAL" (PVC)
+        s.put("elevenLabsTtsModel", "eleven_multilingual_v2");
+        s.put("pvcMinAudioMinutes", 30);
+        s.put("pvcHighFidelityMode", true);
+
         // Publishing
         s.put("timezone", "Asia/Kolkata");
         s.put("reelSlot1", "11:00 AM IST");

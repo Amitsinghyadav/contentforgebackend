@@ -44,6 +44,18 @@ public class VoiceLibraryEntity {
     @Column(name = "is_default")
     private Boolean isDefault;
 
+    @Column(name = "voice_cloning_tier")
+    private String voiceCloningTier; // "INSTANT" or "PROFESSIONAL"
+
+    @Column(name = "training_status")
+    private String trainingStatus; // "READY", "TRAINING", "PENDING_VERIFICATION", "FAILED"
+
+    @Column(name = "audio_duration_minutes")
+    private Double audioDurationMinutes;
+
+    @Column(name = "consent_audio_url")
+    private String consentAudioUrl;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -51,5 +63,7 @@ public class VoiceLibraryEntity {
     public void onCreate() {
         this.createdAt = LocalDateTime.now();
         if (this.isDefault == null) this.isDefault = false;
+        if (this.voiceCloningTier == null) this.voiceCloningTier = "INSTANT";
+        if (this.trainingStatus == null) this.trainingStatus = "READY";
     }
 }

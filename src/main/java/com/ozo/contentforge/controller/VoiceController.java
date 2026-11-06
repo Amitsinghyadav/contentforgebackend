@@ -36,10 +36,13 @@ public class VoiceController {
             @RequestParam(value = "language", required = false) String language,
             @RequestParam(value = "accent", required = false) String accent,
             @RequestParam(value = "isDefault", required = false) Boolean isDefault,
-            @RequestPart(value = "audioFile", required = false) MultipartFile audioFile) throws IOException {
+            @RequestParam(value = "cloneTier", required = false) String cloneTier,
+            @RequestParam(value = "audioDurationMinutes", required = false) Double audioDurationMinutes,
+            @RequestPart(value = "audioFile", required = false) MultipartFile audioFile,
+            @RequestPart(value = "consentFile", required = false) MultipartFile consentFile) throws IOException {
 
         return ResponseEntity.ok(voiceService.createVoice(name, voiceProvider, providerVoiceId,
-                description, gender, language, accent, isDefault, audioFile));
+                description, gender, language, accent, isDefault, audioFile, cloneTier, consentFile, audioDurationMinutes));
     }
 
     @PutMapping(value = "/{id}", consumes = {MediaType.MULTIPART_FORM_DATA_VALUE})

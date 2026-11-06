@@ -42,16 +42,40 @@ public class VoiceLibraryService {
     public VoiceLibraryEntity createVoice(String name, String voiceProvider, String providerVoiceId,
                                           String description, String gender, String language,
                                           String accent, Boolean isDefault, MultipartFile audioFile) throws IOException {
+        return createVoice(name, voiceProvider, providerVoiceId, description, gender, language, accent,
+                isDefault, audioFile, "INSTANT", null, null);
+    }
+
+    @Transactional
+    public VoiceLibraryEntity createVoice(String name, String voiceProvider, String providerVoiceId,
+                                          String description, String gender, String language,
+                                          String accent, Boolean isDefault, MultipartFile audioFile,
+                                          String cloneTier, MultipartFile consentFile, Double audioDurationMinutes) throws IOException {
         String sampleAudioUrl = null;
+        String consentAudioUrl = null;
         String resolvedVoiceId = providerVoiceId;
+        String effectiveTier = (cloneTier != null && cloneTier.equalsIgnoreCase("PROFESSIONAL")) ? "PROFESSIONAL" : "INSTANT";
+
+        if (consentFile != null && !consentFile.isEmpty()) {
+            GeneratedAssetEntity consentAsset = storageService.storeUploadedFile(consentFile, AssetType.AUDIO, null, null);
+            consentAudioUrl = consentAsset.getStorageUrl();
+        }
 
         if (audioFile != null && !audioFile.isEmpty()) {
             GeneratedAssetEntity asset = storageService.storeUploadedFile(audioFile, AssetType.AUDIO, null, null);
             sampleAudioUrl = asset.getStorageUrl();
 
             // Auto-clone via ElevenLabs API if providerVoiceId is not manually specified
-            if (resolvedVoiceId == null || resolvedVoiceId.isBlank() || resolvedVoiceId.startsWith("el_voice_")) {
-                resolvedVoiceId = aiProviderService.cloneElevenLabsVoice(name, audioFile.getBytes(), audioFile.getOriginalFilename(), description);
+            if (resolvedVoiceId == null || resolvedVoiceId.isBlank() || resolvedVoiceId.startsWith("el_voice_") || resolvedVoiceId.startsWith("el_pvc_")) {
+                if ("PROFESSIONAL".equalsIgnoreCase(effectiveTier)) {
+                    byte[] consentBytes = (consentFile != null && !consentFile.isEmpty()) ? consentFile.getBytes() : null;
+                    String consentFilename = (consentFile != null) ? consentFile.getOriginalFilename() : null;
+                    resolvedVoiceId = aiProviderService.cloneElevenLabsPvcVoice(
+                            name, audioFile.getBytes(), audioFile.getOriginalFilename(), description, consentBytes, consentFilename
+                    );
+                } else {
+                    resolvedVoiceId = aiProviderService.cloneElevenLabsVoice(name, audioFile.getBytes(), audioFile.getOriginalFilename(), description);
+                }
             }
         }
 
@@ -78,6 +102,10 @@ public class VoiceLibraryService {
                 .language(language != null ? language : "Hinglish")
                 .accent(accent != null ? accent : "Indian")
                 .isDefault(Boolean.TRUE.equals(isDefault))
+                .voiceCloningTier(effectiveTier)
+                .trainingStatus("READY")
+                .audioDurationMinutes(audioDurationMinutes)
+                .consentAudioUrl(consentAudioUrl)
                 .build();
 
         return voiceRepository.save(entity);

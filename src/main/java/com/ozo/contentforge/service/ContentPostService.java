@@ -400,6 +400,9 @@ public class ContentPostService {
 
         post.setStatus(PostStatus.MEDIA_GENERATING);
         post.setErrorMessage(null);
+        post.setVoiceAudioUrl(null);
+        post.setAvatarVideoUrl(null);
+        post.setFinalRenderUrl(null);
         post = postRepository.save(post);
 
         // Reset scene statuses to QUEUED and clear previous error messages
@@ -475,7 +478,16 @@ public class ContentPostService {
                     : ((post.getPresenterScript() != null ? post.getPresenterScript() : "") + " "
                        + (post.getVoiceoverScript() != null ? post.getVoiceoverScript() : ""));
 
-            if (post.getVoiceAudioUrl() == null || post.getVoiceAudioUrl().isBlank()) {
+            boolean audioNeedsGeneration = post.getVoiceAudioUrl() == null || post.getVoiceAudioUrl().isBlank();
+            if (!audioNeedsGeneration) {
+                double probed = probeMediaDuration(post.getVoiceAudioUrl());
+                if (probed <= 0) {
+                    log.warn("Existing voice audio for post {} is corrupt (probed 0s). Regenerating real voice audio...", postId);
+                    audioNeedsGeneration = true;
+                }
+            }
+
+            if (audioNeedsGeneration) {
                 GeneratedAssetEntity voiceAsset = aiProviderService.generateVoiceAudio(postId, narrationText, voiceId);
                 post.setVoiceAudioUrl(voiceAsset.getStorageUrl());
             } else {
