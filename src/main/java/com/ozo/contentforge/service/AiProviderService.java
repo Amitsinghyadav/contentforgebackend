@@ -495,61 +495,128 @@ public class AiProviderService {
 
     public String cloneElevenLabsPvcVoice(String name, byte[] audioBytes, String filename, String description,
                                           byte[] consentBytes, String consentFilename) {
-        log.info("Initiating ElevenLabs voice clone for '{}' (sample size: {} bytes)...",
+        log.info("Initiating ElevenLabs Professional Voice Clone (PVC) for '{}' (sample size: {} bytes)...",
                 name, audioBytes != null ? audioBytes.length : 0);
         if (!isRealKey(elevenLabsKey)) {
             throw new IllegalStateException("ElevenLabs API key is unconfigured. Please configure 'elevenlabs.api.key' in Master Settings.");
         }
 
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("xi-api-key", elevenLabsKey);
-            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+            // STEP 1: Create PVC Container via POST /v1/voices/pvc
+            HttpHeaders jsonHeaders = new HttpHeaders();
+            jsonHeaders.set("xi-api-key", elevenLabsKey);
+            jsonHeaders.setContentType(MediaType.APPLICATION_JSON);
 
-            org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
-            form.add("name", (name != null && !name.isBlank()) ? name : "Cloned Voice " + UUID.randomUUID().toString().substring(0, 4));
-            if (description != null && !description.isBlank()) {
-                form.add("description", description);
-            } else {
-                form.add("description", "High-fidelity voice clone trained via ContentForge");
+            Map<String, Object> createPayload = new HashMap<>();
+            createPayload.put("name", (name != null && !name.isBlank()) ? name : "PVC Voice " + UUID.randomUUID().toString().substring(0, 4));
+            createPayload.put("language", "en");
+            createPayload.put("description", (description != null && !description.isBlank()) 
+                    ? description 
+                    : "High-fidelity professional voice clone trained via ContentForge");
+            createPayload.put("labels", Map.of(
+                    "tier", "professional",
+                    "origin", "contentforge"
+            ));
+
+            HttpEntity<Map<String, Object>> createEntity = new HttpEntity<>(createPayload, jsonHeaders);
+            log.info("Calling ElevenLabs PVC creation endpoint: {}/voices/pvc...", elevenLabsBaseUrl);
+            ResponseEntity<String> createResp = restTemplate.postForEntity(elevenLabsBaseUrl + "/voices/pvc", createEntity, String.class);
+            JsonNode createRoot = objectMapper.readTree(createResp.getBody());
+            if (!createRoot.has("voice_id")) {
+                throw new RuntimeException("ElevenLabs did not return a voice_id for PVC container: " + createResp.getBody());
             }
+            String voiceId = createRoot.get("voice_id").asText();
+            log.info("ElevenLabs PVC container created with voice_id: {}", voiceId);
 
+            // STEP 2: Upload Samples to PVC container via POST /v1/voices/pvc/{voice_id}/samples
             if (audioBytes != null && audioBytes.length > 0) {
+                HttpHeaders formHeaders = new HttpHeaders();
+                formHeaders.set("xi-api-key", elevenLabsKey);
+                formHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+                org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
                 org.springframework.core.io.ByteArrayResource fileResource = new org.springframework.core.io.ByteArrayResource(audioBytes) {
                     @Override
                     public String getFilename() {
                         return filename != null ? filename : "studio_sample.mp3";
                     }
                 };
-                form.add("files", fileResource);
+                form.add("files[]", fileResource);
+
+                if (consentBytes != null && consentBytes.length > 0) {
+                    org.springframework.core.io.ByteArrayResource consentResource = new org.springframework.core.io.ByteArrayResource(consentBytes) {
+                        @Override
+                        public String getFilename() {
+                            return consentFilename != null ? consentFilename : "pvc_consent.mp3";
+                        }
+                    };
+                    form.add("files[]", consentResource);
+                }
+                form.add("remove_background_noise", "false");
+
+                HttpEntity<org.springframework.util.MultiValueMap<String, Object>> sampleEntity = new HttpEntity<>(form, formHeaders);
+                log.info("Uploading audio samples to ElevenLabs PVC endpoint: {}/voices/pvc/{}/samples...", elevenLabsBaseUrl, voiceId);
+                restTemplate.postForEntity(elevenLabsBaseUrl + "/voices/pvc/" + voiceId + "/samples", sampleEntity, String.class);
+                log.info("Uploaded PVC audio samples successfully for voice_id: {}", voiceId);
             }
 
-            // In ElevenLabs /voices/add, all audio samples are attached under "files"
-            if (consentBytes != null && consentBytes.length > 0) {
-                org.springframework.core.io.ByteArrayResource consentResource = new org.springframework.core.io.ByteArrayResource(consentBytes) {
-                    @Override
-                    public String getFilename() {
-                        return consentFilename != null ? consentFilename : "pvc_consent.mp3";
-                    }
-                };
-                form.add("files", consentResource);
+            // STEP 3: Trigger Model Training via POST /v1/voices/pvc/{voice_id}/train
+            Map<String, Object> trainPayload = new HashMap<>();
+            if (elevenLabsModel != null && !elevenLabsModel.isBlank()) {
+                trainPayload.put("model_id", elevenLabsModel);
+            }
+            HttpEntity<Map<String, Object>> trainEntity = new HttpEntity<>(trainPayload, jsonHeaders);
+            log.info("Triggering ElevenLabs PVC training for voice_id: {} with model: {}...", voiceId, elevenLabsModel);
+            try {
+                restTemplate.postForEntity(elevenLabsBaseUrl + "/voices/pvc/" + voiceId + "/train", trainEntity, String.class);
+                log.info("Successfully queued ElevenLabs PVC model training for voice_id: {}", voiceId);
+            } catch (Exception trainEx) {
+                log.warn("ElevenLabs PVC train call returned warning: {}. The container and samples are created with voice_id: {}",
+                        trainEx.getMessage(), voiceId);
             }
 
-            String targetUrl = elevenLabsBaseUrl + "/voices/add";
-            HttpEntity<org.springframework.util.MultiValueMap<String, Object>> entity = new HttpEntity<>(form, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(targetUrl, entity, String.class);
-            JsonNode root = objectMapper.readTree(response.getBody());
-            if (root.has("voice_id")) {
-                String vid = root.get("voice_id").asText();
-                log.info("ElevenLabs voice clone created successfully with ID: {}", vid);
-                return vid;
-            }
-            throw new RuntimeException("ElevenLabs did not return a voice_id: " + response.getBody());
+            return voiceId;
         } catch (Exception e) {
             String errorMsg = extractElevenLabsErrorMessage(e);
-            log.error("ElevenLabs voice cloning failed: {}", errorMsg);
-            throw new RuntimeException("ElevenLabs Voice Cloning Failed: " + errorMsg, e);
+            log.error("ElevenLabs PVC training failed: {}", errorMsg);
+            throw new RuntimeException("ElevenLabs Professional Voice Cloning Failed: " + errorMsg, e);
         }
+    }
+
+    public Map<String, Object> getElevenLabsVoiceDetails(String voiceId) {
+        if (!isRealKey(elevenLabsKey) || voiceId == null || voiceId.isBlank()) {
+            return Collections.emptyMap();
+        }
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("xi-api-key", elevenLabsKey);
+            HttpEntity<Void> entity = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(
+                    elevenLabsBaseUrl + "/voices/" + voiceId, org.springframework.http.HttpMethod.GET, entity, String.class);
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                JsonNode root = objectMapper.readTree(response.getBody());
+                Map<String, Object> map = new HashMap<>();
+                map.put("voice_id", root.path("voice_id").asText(voiceId));
+                map.put("name", root.path("name").asText());
+                map.put("category", root.path("category").asText());
+                if (root.has("fine_tuning")) {
+                    JsonNode ft = root.get("fine_tuning");
+                    JsonNode stateNode = ft.path("state");
+                    String fineTuningState = "unknown";
+                    if (stateNode.isObject() && stateNode.size() > 0) {
+                        fineTuningState = stateNode.fields().next().getValue().asText();
+                    } else if (stateNode.isTextual()) {
+                        fineTuningState = stateNode.asText();
+                    }
+                    map.put("fineTuningState", fineTuningState);
+                    map.put("isAllowedToFineTune", ft.path("is_allowed_to_fine_tune").asBoolean(true));
+                }
+                return map;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch ElevenLabs voice details for '{}': {}", voiceId, e.getMessage());
+        }
+        return Collections.emptyMap();
     }
 
     public String extractElevenLabsErrorMessage(Exception e) {
@@ -951,16 +1018,23 @@ public class AiProviderService {
                 input.put("character", characterMap);
                 input.put("voice", voiceMap);
 
-                // Dynamic Background Injection
+                // Dynamic Background Injection: Only replace if there is an active default background
                 Optional<BackgroundAssetEntity> defaultBg = backgroundRepository.findByIsDefaultTrue();
                 if (defaultBg.isPresent()) {
+                    // Enable AI background removal (matting) to isolate the avatar from its original recorded room/studio footage
+                    characterMap.put("matting", true);
+
                     String bgType = defaultBg.get().getMediaType().equalsIgnoreCase("VIDEO") ? "video" : "image";
                     String externalBgUrl = storageService.getPresignedUrl(defaultBg.get().getStorageUrl(), Duration.ofHours(24));
                     input.put("background", Map.of(
                             "type", bgType,
                             "url", externalBgUrl
                     ));
-                    log.info("Injected gallery background '{}' ({}) into HeyGen avatar scene", defaultBg.get().getName(), bgType);
+                    log.info("Active default background '{}' ({}) injected with AI matting into HeyGen avatar scene", defaultBg.get().getName(), bgType);
+                } else {
+                    // Keep native trained background as-is (no matting, no background layer)
+                    characterMap.put("matting", false);
+                    log.info("No active default background selected. Preserving avatar's native trained video background.");
                 }
 
                 Map<String, Object> payload = new HashMap<>();

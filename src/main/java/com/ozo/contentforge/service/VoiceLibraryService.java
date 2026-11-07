@@ -10,6 +10,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
@@ -92,6 +93,10 @@ public class VoiceLibraryService {
             });
         }
 
+        boolean isNewlyClonedPvc = "PROFESSIONAL".equalsIgnoreCase(effectiveTier) &&
+                (providerVoiceId == null || providerVoiceId.isBlank() || providerVoiceId.startsWith("el_voice_") || providerVoiceId.startsWith("el_pvc_"));
+        String initialTrainingStatus = isNewlyClonedPvc ? "TRAINING" : "READY";
+
         VoiceLibraryEntity entity = VoiceLibraryEntity.builder()
                 .name(name)
                 .voiceProvider(voiceProvider != null ? voiceProvider : "ElevenLabs")
@@ -103,12 +108,34 @@ public class VoiceLibraryService {
                 .accent(accent != null ? accent : "Indian")
                 .isDefault(Boolean.TRUE.equals(isDefault))
                 .voiceCloningTier(effectiveTier)
-                .trainingStatus("READY")
+                .trainingStatus(initialTrainingStatus)
                 .audioDurationMinutes(audioDurationMinutes)
                 .consentAudioUrl(consentAudioUrl)
                 .build();
 
         return voiceRepository.save(entity);
+    }
+
+    @Transactional
+    public VoiceLibraryEntity syncVoiceStatus(Long id) {
+        VoiceLibraryEntity voice = voiceRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Voice not found: " + id));
+
+        if (voice.getProviderVoiceId() != null && !voice.getProviderVoiceId().isBlank()) {
+            Map<String, Object> details = aiProviderService.getElevenLabsVoiceDetails(voice.getProviderVoiceId());
+            if (details.containsKey("fineTuningState")) {
+                String state = String.valueOf(details.get("fineTuningState")).toLowerCase();
+                if (state.contains("fine_tuned") || state.contains("ready")) {
+                    voice.setTrainingStatus("READY");
+                } else if (state.contains("failed")) {
+                    voice.setTrainingStatus("FAILED");
+                } else if (state.contains("fine_tuning") || state.contains("queued")) {
+                    voice.setTrainingStatus("TRAINING");
+                }
+                return voiceRepository.save(voice);
+            }
+        }
+        return voice;
     }
 
     @Transactional

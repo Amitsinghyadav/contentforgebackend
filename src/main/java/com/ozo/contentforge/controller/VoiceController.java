@@ -62,6 +62,11 @@ public class VoiceController {
                 description, gender, language, accent, isDefault, audioFile));
     }
 
+    @PostMapping("/{id}/sync")
+    public ResponseEntity<VoiceLibraryEntity> syncVoiceStatus(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(voiceService.syncVoiceStatus(id));
+    }
+
     @PostMapping("/{id}/set-default")
     public ResponseEntity<Void> setDefaultVoice(@PathVariable("id") Long id) {
         voiceService.setDefaultVoice(id);
