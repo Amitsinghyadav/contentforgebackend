@@ -108,6 +108,16 @@ public class DatabaseSchemaInitializer {
             log.debug("Notice on video_avatars cleanup: {}", e.getMessage());
         }
 
+        // Clean up legacy default SVG media URLs so they are never returned or preserved
+        try {
+            jdbcTemplate.update("UPDATE content_posts SET thumbnail_url = NULL WHERE thumbnail_url LIKE '%.svg'");
+            jdbcTemplate.update("UPDATE content_posts SET final_render_url = NULL WHERE final_render_url LIKE '%.svg'");
+            jdbcTemplate.update("UPDATE carousel_slides SET image_url = NULL, asset_id = NULL, status = 'QUEUED' WHERE image_url LIKE '%.svg'");
+            log.info("Cleaned up legacy default SVG media URLs from content_posts and carousel_slides.");
+        } catch (Exception e) {
+            log.debug("Notice on cleaning legacy SVG media: {}", e.getMessage());
+        }
+
         log.info("Database schema validation completed.");
     }
 }

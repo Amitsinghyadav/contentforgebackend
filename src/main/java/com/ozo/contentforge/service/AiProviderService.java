@@ -15,6 +15,14 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import javax.imageio.ImageIO;
+import java.awt.AlphaComposite;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -38,6 +46,9 @@ public class AiProviderService {
 
     @Value("${openai.api.base-url:https://api.openai.com/v1}")
     private String openAiBaseUrl;
+
+    @Value("${openai.image.model:gpt-image-1.5}")
+    private String openAiImageModel;
 
     @Value("${elevenlabs.api.key:}")
     private String elevenLabsKey;
@@ -88,17 +99,20 @@ public class AiProviderService {
     private final GenerationUsageRepository usageRepository;
     private final BackgroundAssetRepository backgroundRepository;
     private final com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository;
+    private final MasterSettingsService masterSettingsService;
 
     public AiProviderService(ObjectMapper objectMapper, StorageService storageService,
                              MediaJobRepository mediaJobRepository, GenerationUsageRepository usageRepository,
                              BackgroundAssetRepository backgroundRepository,
-                             com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository) {
+                             com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository,
+                             MasterSettingsService masterSettingsService) {
         this.objectMapper = objectMapper;
         this.storageService = storageService;
         this.mediaJobRepository = mediaJobRepository;
         this.usageRepository = usageRepository;
         this.backgroundRepository = backgroundRepository;
         this.videoAvatarRepository = videoAvatarRepository;
+        this.masterSettingsService = masterSettingsService;
     }
 
     private boolean isRealKey(String key) {
@@ -381,6 +395,249 @@ public class AiProviderService {
                     httpEx.getStatusCode().value(), httpEx.getStatusText(), responseBody);
         }
         return e.getMessage() != null ? e.getMessage() : "Unknown OpenAI connection error";
+    }
+
+    // =========================================================================
+    // 1B. OPENAI DALL-E / IMAGE GENERATION FOR SINGLE POSTS
+    // =========================================================================
+    // 1. OPENAI: DYNAMIC AI IMAGE GENERATION (POSTS & CAROUSEL SLIDES)
+    // =========================================================================
+    public GeneratedAssetEntity generatePostImage(Long postId, String prompt, String topic, String industry) throws Exception {
+        log.info("Generating AI Image Post visual for post {} (topic: '{}')...", postId, topic);
+        String cleanTopic = (topic != null && !topic.isBlank()) ? topic : "Health & Wellness Guidance";
+        String cleanIndustry = (industry != null && !industry.isBlank()) ? industry : "Healthcare";
+        String effectivePrompt = (prompt != null && !prompt.isBlank())
+                ? String.format("A high-impact social media graphic poster for %s about '%s'. %s. Clean, bold, legible typography, compelling modern visual aesthetics, 1024x1024 square.", cleanIndustry, cleanTopic, prompt)
+                : String.format("A high-impact social media graphic poster for %s on the topic '%s'. Prominently render bold, stylish typography with headline text: \"%s\". Combine with professional, elegant medical visuals and modern graphic design layout, 1024x1024 square.", cleanIndustry, cleanTopic, cleanTopic);
+
+        return callOpenAiImageGeneration(postId, effectivePrompt, "GENERATE_POST_IMAGE");
+    }
+
+    public GeneratedAssetEntity generateCarouselSlideImage(Long postId, int slideNumber, String title, String bodyContent, String topic, String industry) throws Exception {
+        log.info("Generating AI Carousel Slide {} image for post {} (title: '{}')...", slideNumber, postId, title);
+        String cleanTopic = (topic != null && !topic.isBlank()) ? topic : "Healthcare";
+        String cleanIndustry = (industry != null && !industry.isBlank()) ? industry : "Healthcare";
+        String cleanTitle = (title != null && !title.isBlank()) ? title : ("Slide " + slideNumber);
+        String cleanBody = (bodyContent != null && !bodyContent.isBlank()) ? bodyContent : cleanTopic;
+
+        String effectivePrompt = String.format(
+                "A professionally designed social media carousel presentation card for %s about '%s'. " +
+                "Prominently render bold, crisp typography displaying the slide title: \"%s\". " +
+                "Include clean, legible subtitle text: \"%s\". " +
+                "Incorporate modern, high-quality medical/scientific 3D illustrations or iconography matching the topic. " +
+                "Well-balanced graphic poster layout with polished typography, beautiful color harmony, 1024x1024 square.",
+                cleanIndustry, cleanTopic, cleanTitle, cleanBody
+        );
+
+        return callOpenAiImageGeneration(postId, effectivePrompt, "GENERATE_CAROUSEL_SLIDE_" + slideNumber);
+    }
+
+    private GeneratedAssetEntity callOpenAiImageGeneration(Long postId, String effectivePrompt, String jobOperation) throws Exception {
+        if (!isRealKey(openAiKey)) {
+            throw new IllegalStateException("OpenAI API key is missing or unconfigured. Cannot generate AI image.");
+        }
+        MediaJobEntity job = recordJob(postId, null, JobProvider.OPENAI, jobOperation);
+
+        String[] modelsToTry = new String[] {
+                (openAiImageModel != null && !openAiImageModel.isBlank()) ? openAiImageModel : "gpt-image-1.5",
+                "gpt-image-1-mini",
+                "chatgpt-image-latest"
+        };
+
+        Exception lastException = null;
+
+        for (String model : modelsToTry) {
+            try {
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_JSON);
+                headers.setBearerAuth(openAiKey);
+
+                Map<String, Object> body = new HashMap<>();
+                body.put("model", model);
+                body.put("prompt", effectivePrompt);
+                body.put("n", 1);
+                body.put("size", "1024x1024");
+
+                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+                ResponseEntity<String> response = restTemplate.postForEntity("https://api.openai.com/v1/images/generations", entity, String.class);
+
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                    JsonNode root = objectMapper.readTree(response.getBody());
+                    if (root.has("data") && root.get("data").isArray() && root.get("data").size() > 0) {
+                        JsonNode firstItem = root.get("data").get(0);
+                        byte[] imgBytes = null;
+
+                        if (firstItem.has("b64_json") && !firstItem.get("b64_json").asText().isBlank()) {
+                            imgBytes = java.util.Base64.getDecoder().decode(firstItem.get("b64_json").asText());
+                        } else if (firstItem.has("url") && !firstItem.get("url").asText().isBlank()) {
+                            String imageUrl = firstItem.get("url").asText();
+                            imgBytes = restTemplate.getForObject(imageUrl, byte[].class);
+                        }
+
+                        if (imgBytes != null && imgBytes.length > 0) {
+                            byte[] brandedImgBytes = overlayBrandLogoIfConfigured(imgBytes);
+
+                            GeneratedAssetEntity asset = storageService.saveGeneratedMedia(
+                                    brandedImgBytes,
+                                    ".png",
+                                    "image/png",
+                                    AssetType.IMAGE,
+                                    postId,
+                                    null,
+                                    null,
+                                    String.format("{\"prompt\": %s, \"model\": \"%s\"}", objectMapper.writeValueAsString(effectivePrompt), model)
+                            );
+                            job.setStatus(JobStatus.COMPLETED);
+                            job.setCostUsd(0.04);
+                            job.setCompletedAt(LocalDateTime.now());
+                            mediaJobRepository.save(job);
+                            log.info("Successfully generated AI image for post {} using model {}: {}", postId, model, asset.getStorageUrl());
+                            return asset;
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                lastException = e;
+                log.warn("OpenAI image generation failed with model {}: {}. Trying next model...", model, e.getMessage());
+            }
+        }
+
+        job.setStatus(JobStatus.FAILED);
+        String errDetail = lastException != null ? lastException.getMessage() : "All OpenAI image generation models failed";
+        job.setErrorJson(String.format("{\"error\": %s}", objectMapper.writeValueAsString(errDetail)));
+        mediaJobRepository.save(job);
+        log.error("AI image generation completely failed for post {}: {}", postId, errDetail);
+        throw new RuntimeException("AI Image Generation Failed: " + errDetail);
+    }
+
+    /**
+     * Overlay brand logo onto generated image (e.g. Carousel slide or Image post).
+     * Automatically adjusts scale, positioning, and adds a sleek translucent backdrop for high contrast.
+     */
+    private byte[] overlayBrandLogoIfConfigured(byte[] baseImageBytes) {
+        if (masterSettingsService == null) {
+            return baseImageBytes;
+        }
+        try {
+            Map<String, Object> settings = masterSettingsService.getAllSettings();
+            String logoUrl = (String) settings.get("brandLogoUrl");
+            if (logoUrl == null || logoUrl.isBlank()) {
+                return baseImageBytes;
+            }
+
+            byte[] logoBytes = null;
+            String cleanKey = storageService.extractS3Key(logoUrl);
+            if (cleanKey != null && !cleanKey.startsWith("http")) {
+                logoBytes = storageService.getS3Object(cleanKey);
+            } else if (logoUrl.startsWith("http")) {
+                logoBytes = restTemplate.getForObject(logoUrl, byte[].class);
+            }
+
+            if (logoBytes == null || logoBytes.length == 0) {
+                return baseImageBytes;
+            }
+
+            BufferedImage baseImg = ImageIO.read(new ByteArrayInputStream(baseImageBytes));
+            BufferedImage logoImg = ImageIO.read(new ByteArrayInputStream(logoBytes));
+            if (baseImg == null || logoImg == null) {
+                return baseImageBytes;
+            }
+
+            int baseW = baseImg.getWidth();
+            int baseH = baseImg.getHeight();
+
+            // Mathematically maintain 100% exact original aspect ratio with zero distortion or squishing
+            int maxW = (int) (baseW * 0.28); // ~286px on 1024x1024 (ensures text remains sharp and legible)
+            int maxH = (int) (baseH * 0.12); // ~120px on 1024x1024
+
+            double scale = Math.min((double) maxW / logoImg.getWidth(), (double) maxH / logoImg.getHeight());
+            if (scale > 1.0) {
+                scale = 1.0; // Keep 1:1 original if logo is already compact
+            }
+
+            int targetLogoW = (int) Math.round(logoImg.getWidth() * scale);
+            int targetLogoH = (int) Math.round(logoImg.getHeight() * scale);
+
+            int margin = Math.max(24, (int) (baseW * 0.03));
+            int posY = margin;
+
+            // Pick the empty corner (Top-Right or Top-Left) based on open negative space
+            int trX = baseW - targetLogoW - margin;
+            int tlX = margin;
+
+            double trComplexity = calculateRegionComplexity(baseImg, trX, posY, targetLogoW, targetLogoH);
+            double tlComplexity = calculateRegionComplexity(baseImg, tlX, posY, targetLogoW, targetLogoH);
+
+            int posX = (trComplexity <= tlComplexity * 1.25) ? trX : tlX;
+
+            BufferedImage combined = new BufferedImage(baseW, baseH, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = combined.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            g.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY);
+            g.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
+
+            // 1. Draw poster
+            g.drawImage(baseImg, 0, 0, null);
+
+            // 2. Paste logo directly as-is into open space with exact original aspect ratio
+            g.drawImage(logoImg, posX, posY, targetLogoW, targetLogoH, null);
+            g.dispose();
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(combined, "png", baos);
+            log.info("Pasted transparent brand logo into open {} corner as-is", (posX == trX ? "Top-Right" : "Top-Left"));
+            return baos.toByteArray();
+        } catch (Exception e) {
+            log.warn("Brand logo placement skipped: {}", e.getMessage());
+            return baseImageBytes;
+        }
+    }
+
+    /**
+     * Compute visual complexity score in a region to find the empty space corner.
+     */
+    private double calculateRegionComplexity(BufferedImage img, int rx, int ry, int rw, int rh) {
+        if (img == null) return 0;
+        int imgW = img.getWidth();
+        int imgH = img.getHeight();
+
+        long totalLum = 0;
+        int count = 0;
+        int step = 2;
+
+        int maxX = Math.min(rx + rw, imgW);
+        int maxY = Math.min(ry + rh, imgH);
+
+        for (int y = Math.max(0, ry); y < maxY; y += step) {
+            for (int x = Math.max(0, rx); x < maxX; x += step) {
+                int rgb = img.getRGB(x, y);
+                int r = (rgb >> 16) & 0xff;
+                int g = (rgb >> 8) & 0xff;
+                int b = rgb & 0xff;
+                int lum = (299 * r + 587 * g + 114 * b) / 1000;
+                totalLum += lum;
+                count++;
+            }
+        }
+
+        if (count == 0) return 0;
+        double mean = (double) totalLum / count;
+        double variance = 0;
+
+        for (int y = Math.max(0, ry); y < maxY; y += step) {
+            for (int x = Math.max(0, rx); x < maxX; x += step) {
+                int rgb = img.getRGB(x, y);
+                int r = (rgb >> 16) & 0xff;
+                int g = (rgb >> 8) & 0xff;
+                int b = rgb & 0xff;
+                int lum = (299 * r + 587 * g + 114 * b) / 1000;
+                variance += (lum - mean) * (lum - mean);
+            }
+        }
+
+        return variance / count;
     }
 
     // =========================================================================
@@ -1375,6 +1632,14 @@ public class AiProviderService {
         log.info("Compositing final 9:16 vertical Reel for post {}...", postId);
         MediaJobEntity job = recordJob(postId, null, JobProvider.FFMPEG, "COMPOSITE_VIDEO");
 
+        String brandLogoUrl = null;
+        if (masterSettingsService != null) {
+            try {
+                Map<String, Object> settings = masterSettingsService.getAllSettings();
+                brandLogoUrl = (String) settings.get("brandLogoUrl");
+            } catch (Exception ignored) {}
+        }
+
         String finalUrl = (avatarVideoUrl != null && !avatarVideoUrl.isBlank()) ? avatarVideoUrl : "https://app.heygen.com/share/composite_" + postId;
 
         List<ContentSceneEntity> brollScenes = (scenes != null) ? scenes.stream()
@@ -1382,11 +1647,11 @@ public class AiProviderService {
                 .sorted(Comparator.comparingInt(ContentSceneEntity::getSceneNumber))
                 .toList() : List.of();
 
-        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && !brollScenes.isEmpty()) {
+        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && (!brollScenes.isEmpty() || (brandLogoUrl != null && !brandLogoUrl.isBlank()))) {
             try {
                 String ffmpegBin = findFfmpegBinary();
                 if (ffmpegBin != null) {
-                    finalUrl = executeFfmpegComposite(ffmpegBin, postId, avatarVideoUrl, brollScenes);
+                    finalUrl = executeFfmpegComposite(ffmpegBin, postId, avatarVideoUrl, brollScenes, brandLogoUrl);
                 }
             } catch (Exception e) {
                 log.warn("FFmpeg multi-scene composition encountered error: {}. Gracefully using avatar video.", e.getMessage(), e);
@@ -1422,7 +1687,8 @@ public class AiProviderService {
         return "ffmpeg";
     }
 
-    private String executeFfmpegComposite(String ffmpegBin, Long postId, String avatarUrl, List<ContentSceneEntity> brolls) throws Exception {
+    private String executeFfmpegComposite(String ffmpegBin, Long postId, String avatarUrl,
+                                          List<ContentSceneEntity> brolls, String brandLogoUrl) throws Exception {
         Path tempDir = Files.createTempDirectory("comp_post_" + postId + "_");
         Process proc = null;
         try {
@@ -1438,10 +1704,24 @@ public class AiProviderService {
                 brollFiles.add(brollFile);
             }
 
+            // 3. Download Brand Logo if configured
+            Path logoFile = null;
+            if (brandLogoUrl != null && !brandLogoUrl.isBlank()) {
+                try {
+                    Path candidateLogo = tempDir.resolve("brand_logo.png");
+                    downloadFile(brandLogoUrl, candidateLogo);
+                    if (Files.exists(candidateLogo) && Files.size(candidateLogo) > 0) {
+                        logoFile = candidateLogo;
+                    }
+                } catch (Exception logoEx) {
+                    log.warn("Could not download brand logo for video overlay: {}", logoEx.getMessage());
+                }
+            }
+
             Path outputFile = tempDir.resolve("output_composite.mp4");
             Path logFile = tempDir.resolve("ffmpeg_composite.log");
 
-            // 3. Build FFmpeg command with cutaway overlay filter
+            // 4. Build FFmpeg command with cutaways and logo watermark filter
             List<String> cmd = new ArrayList<>();
             cmd.add(ffmpegBin);
             cmd.add("-y");
@@ -1451,6 +1731,13 @@ public class AiProviderService {
             for (Path bf : brollFiles) {
                 cmd.add("-i");
                 cmd.add(bf.toAbsolutePath().toString());
+            }
+
+            int logoInputIdx = -1;
+            if (logoFile != null) {
+                logoInputIdx = 1 + brollFiles.size();
+                cmd.add("-i");
+                cmd.add(logoFile.toAbsolutePath().toString());
             }
 
             StringBuilder filter = new StringBuilder();
@@ -1469,11 +1756,17 @@ public class AiProviderService {
                 ContentSceneEntity sc = brolls.get(i);
                 int start = sc.getStartTimeSeconds() != null ? sc.getStartTimeSeconds() : (10 + i * 15);
                 int end = start + (sc.getDurationSeconds() != null ? sc.getDurationSeconds() : 5);
-                String nextOut = (i == brolls.size() - 1) ? "[outv]" : "[v" + (i + 1) + "]";
-                filter.append(String.format("%s[b%d]overlay=0:0:enable='between(t,%d,%d)':eof_action=repeat%s",
+                String nextOut = "[v" + (i + 1) + "]";
+                filter.append(String.format("%s[b%d]overlay=0:0:enable='between(t,%d,%d)':eof_action=repeat%s;",
                         currentBase, i + 1, start, end, nextOut));
-                if (i < brolls.size() - 1) filter.append(";");
                 currentBase = nextOut;
+            }
+
+            if (logoInputIdx != -1) {
+                filter.append(String.format("[%d:v]scale=180:-1[logo_scaled];", logoInputIdx));
+                filter.append(String.format("%s[logo_scaled]overlay=main_w-overlay_w-40:50:format=auto[outv]", currentBase));
+            } else {
+                filter.append(String.format("%snull[outv]", currentBase));
             }
 
             cmd.add("-filter_complex");

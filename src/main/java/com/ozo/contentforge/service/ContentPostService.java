@@ -277,24 +277,17 @@ public class ContentPostService {
                     Map<String, Object> sl = dynamicSlides.get(i);
                     String sTitle = extractString(sl.getOrDefault("title", "Insight #" + (i + 1)));
                     String sBody = extractString(sl.containsKey("body") ? sl.get("body") : sl.get("bodyContent"));
-                    try {
-                        GeneratedAssetEntity slideAsset = storageService.generateBrandedSlideSvg(
-                                sTitle, sBody, industry.toUpperCase(), i + 1, post.getId()
-                        );
-                        CarouselSlideEntity slide = CarouselSlideEntity.builder()
-                                .postId(post.getId())
-                                .slideNumber(i + 1)
-                                .title(sTitle)
-                                .bodyContent(sBody)
-                                .visualPrompt("Modern high-impact presentation card for " + industry)
-                                .assetId(slideAsset.getId())
-                                .imageUrl(slideAsset.getStorageUrl())
-                                .status(JobStatus.COMPLETED)
-                                .build();
-                        slideRepository.save(slide);
-                    } catch (Exception e) {
-                        log.error("Failed to generate slide asset: {}", e.getMessage());
-                    }
+                    CarouselSlideEntity slide = CarouselSlideEntity.builder()
+                            .postId(post.getId())
+                            .slideNumber(i + 1)
+                            .title(sTitle)
+                            .bodyContent(sBody)
+                            .visualPrompt("Modern high-impact presentation card for " + industry)
+                            .assetId(null)
+                            .imageUrl(null)
+                            .status(JobStatus.QUEUED)
+                            .build();
+                    slideRepository.save(slide);
                 }
             } else {
                 String[] slideTitles = new String[] {
@@ -315,26 +308,23 @@ public class ContentPostService {
                 };
 
                 for (int i = 0; i < 6; i++) {
-                    try {
-                        GeneratedAssetEntity slideAsset = storageService.generateBrandedSlideSvg(
-                                slideTitles[i], slideContents[i], industry.toUpperCase(), i + 1, post.getId()
-                        );
-                        CarouselSlideEntity slide = CarouselSlideEntity.builder()
-                                .postId(post.getId())
-                                .slideNumber(i + 1)
-                                .title(slideTitles[i])
-                                .bodyContent(slideContents[i])
-                                .visualPrompt("Modern minimalist business infographic card")
-                                .assetId(slideAsset.getId())
-                                .imageUrl(slideAsset.getStorageUrl())
-                                .status(JobStatus.COMPLETED)
-                                .build();
-                        slideRepository.save(slide);
-                    } catch (Exception e) {
-                        log.error("Failed to generate slide asset: {}", e.getMessage());
-                    }
+                    CarouselSlideEntity slide = CarouselSlideEntity.builder()
+                            .postId(post.getId())
+                            .slideNumber(i + 1)
+                            .title(slideTitles[i])
+                            .bodyContent(slideContents[i])
+                            .visualPrompt("Modern minimalist business infographic card")
+                            .assetId(null)
+                            .imageUrl(null)
+                            .status(JobStatus.QUEUED)
+                            .build();
+                    slideRepository.save(slide);
                 }
             }
+            // Do NOT generate slide images yet - awaiting script approval!
+        } else if (contentType == ContentType.POST) {
+            // Visual prompt and copy are saved in post - image generation is deferred until script approval!
+            log.info("Single image post {} planned with status PENDING_TEXT_APPROVAL. Image generation deferred until approval.", post.getId());
         }
 
         return post;
@@ -347,9 +337,19 @@ public class ContentPostService {
     @Transactional
     public ContentPostEntity approveText(Long postId, String updatedPresenterScript, String updatedVoiceoverScript,
                                          String updatedCaption, String updatedCta, String reviewerId) {
+        return approveText(postId, updatedPresenterScript, updatedVoiceoverScript, updatedCaption, updatedCta, reviewerId, null, null);
+    }
+
+    @Transactional
+    public ContentPostEntity approveText(Long postId, String updatedPresenterScript, String updatedVoiceoverScript,
+                                         String updatedCaption, String updatedCta, String reviewerId,
+                                         String updatedHook, List<Map<String, Object>> updatedSlides) {
         ContentPostEntity post = postRepository.findById(postId)
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
 
+        if (updatedHook != null && !updatedHook.trim().isEmpty()) {
+            post.setHook(updatedHook);
+        }
         if (updatedPresenterScript != null && !updatedPresenterScript.trim().isEmpty()) {
             post.setPresenterScript(updatedPresenterScript);
         }
@@ -361,6 +361,22 @@ public class ContentPostService {
         }
         if (updatedCta != null && !updatedCta.trim().isEmpty()) {
             post.setCta(updatedCta);
+        }
+
+        // Update Carousel slides with approved text before generating images
+        if (updatedSlides != null && !updatedSlides.isEmpty()) {
+            for (Map<String, Object> slMap : updatedSlides) {
+                if (slMap.containsKey("slideNumber") && slMap.get("slideNumber") != null) {
+                    int sNum = ((Number) slMap.get("slideNumber")).intValue();
+                    String sTitle = (String) slMap.get("title");
+                    String sBody = (String) slMap.get("bodyContent");
+                    slideRepository.findByPostIdAndSlideNumber(postId, sNum).ifPresent(s -> {
+                        if (sTitle != null) s.setTitle(sTitle);
+                        if (sBody != null) s.setBodyContent(sBody);
+                        slideRepository.save(s);
+                    });
+                }
+            }
         }
 
         post.setStatus(PostStatus.TEXT_APPROVED);
@@ -452,6 +468,77 @@ public class ContentPostService {
         post.setErrorMessage(null);
         postRepository.save(post);
 
+        // =====================================================================
+        // 1. CAROUSEL MEDIA PIPELINE (OPENAI DYNAMIC AI SLIDE GENERATION)
+        // =====================================================================
+        if (post.getContentType() == ContentType.CAROUSEL) {
+            log.info("Processing media approval for Carousel post {}...", postId);
+            BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
+            String industry = (brand != null && brand.getIndustry() != null) ? brand.getIndustry() : "HEALTHCARE";
+
+            List<CarouselSlideEntity> slides = slideRepository.findByPostIdOrderBySlideNumberAsc(postId);
+            for (CarouselSlideEntity slide : slides) {
+                try {
+                    GeneratedAssetEntity slideAsset = aiProviderService.generateCarouselSlideImage(
+                            postId, slide.getSlideNumber(), slide.getTitle(), slide.getBodyContent(), post.getTopic(), industry.toUpperCase()
+                    );
+                    if (slideAsset != null) {
+                        slide.setImageUrl(slideAsset.getStorageUrl());
+                        slide.setAssetId(slideAsset.getId());
+                        slide.setStatus(JobStatus.COMPLETED);
+                        slideRepository.save(slide);
+                    }
+                } catch (Exception e) {
+                    log.error("Failed to generate AI slide asset for slide {}: {}", slide.getSlideNumber(), e.getMessage());
+                    slide.setStatus(JobStatus.FAILED);
+                    slideRepository.save(slide);
+                }
+            }
+
+            if (!slides.isEmpty() && slides.get(0).getImageUrl() != null) {
+                post.setThumbnailUrl(slides.get(0).getImageUrl());
+                post.setFinalRenderUrl(slides.get(0).getImageUrl());
+            }
+            post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
+            postRepository.save(post);
+            log.info("Carousel post {} media pipeline completed. Ready for final approval.", postId);
+            return;
+        }
+
+        // =====================================================================
+        // 2. SINGLE IMAGE POST MEDIA PIPELINE (OPENAI DYNAMIC AI ARTWORK)
+        // =====================================================================
+        if (post.getContentType() == ContentType.POST) {
+            log.info("Processing media approval for Image post {}...", postId);
+            BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
+            String industry = (brand != null && brand.getIndustry() != null) ? brand.getIndustry() : "HEALTHCARE";
+
+            try {
+                String prompt = (post.getHook() != null && !post.getHook().isBlank()) ? post.getHook() : post.getTopic();
+                GeneratedAssetEntity imageAsset = aiProviderService.generatePostImage(
+                        postId, prompt, post.getTopic(), industry
+                );
+                if (imageAsset != null) {
+                    post.setThumbnailUrl(imageAsset.getStorageUrl());
+                    post.setFinalRenderUrl(imageAsset.getStorageUrl());
+                    post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
+                } else {
+                    post.setStatus(PostStatus.FAILED);
+                    post.setErrorMessage("AI Image generation returned null asset.");
+                }
+            } catch (Exception e) {
+                log.error("Failed to generate AI image asset: {}", e.getMessage());
+                post.setStatus(PostStatus.FAILED);
+                post.setErrorMessage("AI Image Generation Error: " + e.getMessage());
+            }
+            postRepository.save(post);
+            log.info("Image post {} media pipeline completed. Status: {}", postId, post.getStatus());
+            return;
+        }
+
+        // =====================================================================
+        // 3. REEL MEDIA PIPELINE (AVATAR + ELEVENLABS + RUNWAY B-ROLL + MERGE)
+        // =====================================================================
         try {
             double totalCost = 0.0;
 
@@ -950,13 +1037,17 @@ public class ContentPostService {
         if (title != null) slide.setTitle(title);
         if (bodyContent != null) slide.setBodyContent(bodyContent);
 
-        // Regenerate slide graphic
-        GeneratedAssetEntity asset = storageService.generateBrandedSlideSvg(
-                slide.getTitle(), slide.getBodyContent(), "METABOLIC HEALTH", slideNumber, postId
+        // Regenerate slide graphic via AI image model
+        ContentPostEntity post = postRepository.findById(postId).orElse(null);
+        String topic = post != null ? post.getTopic() : "Healthcare";
+        GeneratedAssetEntity asset = aiProviderService.generateCarouselSlideImage(
+                postId, slideNumber, slide.getTitle(), slide.getBodyContent(), topic, "HEALTHCARE"
         );
-        slide.setAssetId(asset.getId());
-        slide.setImageUrl(asset.getStorageUrl());
-        slide.setStatus(JobStatus.COMPLETED);
+        if (asset != null) {
+            slide.setAssetId(asset.getId());
+            slide.setImageUrl(asset.getStorageUrl());
+            slide.setStatus(JobStatus.COMPLETED);
+        }
 
         return slideRepository.save(slide);
     }

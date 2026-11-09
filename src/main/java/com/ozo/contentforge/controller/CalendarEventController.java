@@ -7,7 +7,9 @@ import com.ozo.contentforge.model.enums.ContentType;
 import com.ozo.contentforge.model.enums.PostMode;
 import com.ozo.contentforge.model.enums.RecurrenceRule;
 import com.ozo.contentforge.service.ContentPostService;
+import com.ozo.contentforge.service.MasterSettingsService;
 import com.ozo.contentforge.service.OccasionCalendarService;
+import com.ozo.contentforge.service.PlanService;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -23,10 +25,17 @@ public class CalendarEventController {
 
     private final OccasionCalendarService calendarService;
     private final ContentPostService postService;
+    private final PlanService planService;
+    private final MasterSettingsService settingsService;
 
-    public CalendarEventController(OccasionCalendarService calendarService, ContentPostService postService) {
+    public CalendarEventController(OccasionCalendarService calendarService,
+                                   ContentPostService postService,
+                                   PlanService planService,
+                                   MasterSettingsService settingsService) {
         this.calendarService = calendarService;
         this.postService = postService;
+        this.planService = planService;
+        this.settingsService = settingsService;
     }
 
     @GetMapping
@@ -44,6 +53,12 @@ public class CalendarEventController {
     @PostMapping
     public ResponseEntity<ContentCalendarEventEntity> createEvent(@RequestBody Map<String, Object> req) {
         String title = (String) req.get("title");
+        if (title == null || title.isBlank()) {
+            Map<String, Object> allSettings = settingsService.getAllSettings();
+            String industry = (String) allSettings.getOrDefault("industry", "Healthcare");
+            String defaultTagline = (String) allSettings.getOrDefault("tagline", "Daily Preventive Health");
+            title = defaultTagline + " (" + industry + ")";
+        }
         LocalDate eventDate = LocalDate.parse((String) req.get("eventDate"));
         RecurrenceRule recurrence = req.containsKey("recurrenceRule") ? RecurrenceRule.valueOf((String) req.get("recurrenceRule")) : RecurrenceRule.NONE;
         String themeBrief = (String) req.get("themeBrief");
@@ -54,6 +69,8 @@ public class CalendarEventController {
         PostMode mode = req.containsKey("productionMode") ? PostMode.valueOf((String) req.get("productionMode")) : PostMode.MODE_A;
         String publishTime = (String) req.getOrDefault("publishTime", "11:00 AM");
         Boolean replaceQuota = Boolean.TRUE.equals(req.get("replaceQuota"));
+
+        planService.consumeQuota(null, contentType.name());
 
         return ResponseEntity.ok(calendarService.createEvent(title, eventDate, recurrence, themeBrief, extraCount,
                 contentType, slideCount, language, mode, publishTime, replaceQuota));

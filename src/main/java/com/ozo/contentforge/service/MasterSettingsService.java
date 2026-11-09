@@ -84,6 +84,7 @@ public class MasterSettingsService {
     public Map<String, Object> getDefaultSettings() {
         Map<String, Object> s = new HashMap<>();
         s.put("brandName", "OZO Health");
+        s.put("brandLogoUrl", "");
         s.put("industry", "Preventive Healthcare & Diagnostics");
         s.put("tagline", "Evidence-based daily preventive health & metabolic insights");
         s.put("brandTone", "Trustworthy, clear, Indian, empathetic");
@@ -92,10 +93,7 @@ public class MasterSettingsService {
         s.put("defaultLanguage", "Hinglish");
         s.put("languageMix", "Hindi-led with natural English medical terms");
 
-        // Quotas
-        s.put("dailyReels", 2);
-        s.put("dailyPosts", 0);
-        s.put("dailyCarousels", 0);
+        // Content Generation & Formatting (Quotas are dynamically driven by the Reel Planner)
         s.put("carouselSlideCount", 6);
         s.put("occasionExtraItems", 1);
 

@@ -92,14 +92,27 @@ public class ContentPostController {
 
     @PostMapping("/{id}/approve-text")
     public ResponseEntity<ContentPostEntity> approveText(@PathVariable("id") Long id,
-                                                         @RequestBody(required = false) Map<String, String> body) {
-        String script = body != null ? body.get("presenterScript") : null;
-        String voiceover = body != null ? body.get("voiceoverScript") : null;
-        String caption = body != null ? body.get("caption") : null;
-        String cta = body != null ? body.get("cta") : null;
-        String reviewer = body != null ? body.get("reviewerId") : "admin";
+                                                         @RequestBody(required = false) Map<String, Object> body) {
+        String script = body != null && body.get("presenterScript") != null ? body.get("presenterScript").toString() : null;
+        String voiceover = body != null && body.get("voiceoverScript") != null ? body.get("voiceoverScript").toString() : null;
+        String caption = body != null && body.get("caption") != null ? body.get("caption").toString() : null;
+        String cta = body != null && body.get("cta") != null ? body.get("cta").toString() : null;
+        String hook = body != null && body.get("hook") != null ? body.get("hook").toString() : null;
+        String reviewer = body != null && body.get("reviewerId") != null ? body.get("reviewerId").toString() : "admin";
 
-        return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer));
+        List<Map<String, Object>> slides = null;
+        if (body != null && body.get("slides") instanceof List<?> list) {
+            slides = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> castMap = (Map<String, Object>) m;
+                    slides.add(castMap);
+                }
+            }
+        }
+
+        return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer, hook, slides));
     }
 
     @PostMapping("/{id}/retry-media")

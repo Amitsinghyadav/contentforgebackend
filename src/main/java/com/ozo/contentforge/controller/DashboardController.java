@@ -24,6 +24,7 @@ public class DashboardController {
     private final OccasionCalendarService calendarService;
     private final MasterSettingsService settingsService;
     private final GenerationUsageRepository usageRepository;
+    private final PlanService planService;
     private final ObjectMapper objectMapper;
 
     public DashboardController(ContentPostService postService,
@@ -31,12 +32,14 @@ public class DashboardController {
                                OccasionCalendarService calendarService,
                                MasterSettingsService settingsService,
                                GenerationUsageRepository usageRepository,
+                               PlanService planService,
                                ObjectMapper objectMapper) {
         this.postService = postService;
         this.batchService = batchService;
         this.calendarService = calendarService;
         this.settingsService = settingsService;
         this.usageRepository = usageRepository;
+        this.planService = planService;
         this.objectMapper = objectMapper;
     }
 
@@ -54,11 +57,13 @@ public class DashboardController {
 
         // 2. Fetch posts from database
         List<ContentPostEntity> posts = postService.getPostsForDate(targetDate);
+        List<ContentCalendarEventEntity> calendarEvents = calendarService.getEventsForDate(targetDate);
 
+        // Daily quotas are driven by the Reel Planner calendar
+        int quotaReels = (int) calendarEvents.stream().filter(e -> e.getContentType() == ContentType.REEL).count();
+        int quotaPosts = (int) calendarEvents.stream().filter(e -> e.getContentType() == ContentType.POST).count();
+        int quotaCarousels = (int) calendarEvents.stream().filter(e -> e.getContentType() == ContentType.CAROUSEL).count();
         Map<String, Object> masterSettings = settingsService.getAllSettings();
-        int quotaReels = ((Number) masterSettings.getOrDefault("dailyReels", 0)).intValue();
-        int quotaPosts = ((Number) masterSettings.getOrDefault("dailyPosts", 0)).intValue();
-        int quotaCarousels = ((Number) masterSettings.getOrDefault("dailyCarousels", 0)).intValue();
 
         // Grouping & counters from actual posts in DB
         int generatedReels = 0, approvedReels = 0, scheduledReels = 0, publishedReels = 0;
@@ -132,9 +137,6 @@ public class DashboardController {
             contentCards.add(card);
         }
 
-        // Active calendar events for this date
-        List<ContentCalendarEventEntity> calendarEvents = calendarService.getEventsForDate(targetDate);
-
         // Daily Summary
         Map<String, Object> summary = new HashMap<>();
         summary.put("reels", Map.of(
@@ -149,13 +151,14 @@ public class DashboardController {
                 "quota", quotaCarousels, "generated", generatedCarousels,
                 "approved", approvedCarousels, "scheduled", scheduledCarousels, "published", publishedCarousels
         ));
-        summary.put("totalSpendUsd", Math.round(totalDaySpend * 100.0) / 100.0);
+        Optional<UserSubscriptionEntity> activeSub = planService.getActiveSubscriptionForUser(null);
 
         Map<String, Object> response = new HashMap<>();
         response.put("date", targetDate);
         response.put("batchId", batchId);
         response.put("batchStatus", batchStatus);
         response.put("summary", summary);
+        response.put("subscription", activeSub.orElse(null));
         response.put("posts", contentCards);
         response.put("calendarEvents", calendarEvents);
         response.put("masterSettings", masterSettings);
