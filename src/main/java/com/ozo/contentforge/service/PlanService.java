@@ -230,5 +230,44 @@ public class PlanService {
         subscriptionRepository.save(sub);
         return true;
     }
+
+    @Transactional
+    public boolean releaseQuota(Long userId, String plannerType) {
+        Optional<UserSubscriptionEntity> subOpt = getActiveSubscriptionForUser(userId);
+        if (subOpt.isEmpty()) {
+            return true;
+        }
+        UserSubscriptionEntity sub = subOpt.get();
+        String type = plannerType != null ? plannerType.toUpperCase() : "REEL";
+
+        switch (type) {
+            case "EVENT_REEL" -> sub.setEventReelsUsed(Math.max(0, sub.getEventReelsUsed() - 1));
+            case "EVENT_POST" -> sub.setEventPostsUsed(Math.max(0, sub.getEventPostsUsed() - 1));
+            case "CAROUSEL" -> sub.setCarouselUsed(Math.max(0, sub.getCarouselUsed() - 1));
+            case "IMAGE_POST", "POST" -> sub.setImagePostsUsed(Math.max(0, sub.getImagePostsUsed() - 1));
+            case "REEL" -> sub.setReelsUsed(Math.max(0, sub.getReelsUsed() - 1));
+            default -> sub.setReelsUsed(Math.max(0, sub.getReelsUsed() - 1));
+        }
+        subscriptionRepository.save(sub);
+        log.info("Released 1 quota slot for type '{}' under subscription id {}", type, sub.getId());
+        return true;
+    }
+
+    public boolean hasAvailableQuota(Long userId, String plannerType) {
+        Optional<UserSubscriptionEntity> subOpt = getActiveSubscriptionForUser(userId);
+        if (subOpt.isEmpty()) {
+            return true;
+        }
+        UserSubscriptionEntity sub = subOpt.get();
+        String type = plannerType != null ? plannerType.toUpperCase() : "REEL";
+        return switch (type) {
+            case "EVENT_REEL" -> sub.getRemainingEventReels() > 0;
+            case "EVENT_POST" -> sub.getRemainingEventPosts() > 0;
+            case "CAROUSEL" -> sub.getRemainingCarousel() > 0;
+            case "IMAGE_POST", "POST" -> sub.getRemainingImagePosts() > 0;
+            case "REEL" -> sub.getRemainingReels() > 0;
+            default -> sub.getRemainingReels() > 0;
+        };
+    }
 }
 

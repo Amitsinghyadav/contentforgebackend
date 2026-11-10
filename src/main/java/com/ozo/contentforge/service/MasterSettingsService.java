@@ -35,7 +35,10 @@ public class MasterSettingsService {
         return settingsRepository.findBySettingKey("GLOBAL_CONFIG")
                 .map(entity -> {
                     try {
-                        return objectMapper.readValue(entity.getSettingValueJson(), new TypeReference<Map<String, Object>>() {});
+                        Map<String, Object> merged = new HashMap<>(getDefaultSettings());
+                        Map<String, Object> stored = objectMapper.readValue(entity.getSettingValueJson(), new TypeReference<Map<String, Object>>() {});
+                        merged.putAll(stored);
+                        return merged;
                     } catch (Exception e) {
                         log.error("Failed to parse settings JSON: {}", e.getMessage());
                         return getDefaultSettings();
@@ -90,6 +93,7 @@ public class MasterSettingsService {
         s.put("brandTone", "Trustworthy, clear, Indian, empathetic");
         s.put("website", "https://ozohealth.in");
         s.put("cta", "Download OZO Health app for personalized metabolic screenings");
+        s.put("attachEndCta", true); // Enable/disable dedicated Call-To-Action (CTA) end scene & carousel slide
         s.put("defaultLanguage", "Hinglish");
         s.put("languageMix", "Hindi-led with natural English medical terms");
 

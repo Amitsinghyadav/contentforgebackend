@@ -159,12 +159,18 @@ public class ContentPostService {
         int brollClipDuration = extractInt(settings.get("brollClipDuration"), 5);
         int defaultReelDur = extractInt(settings.get("reelDurationTarget"), 45);
         int effectiveDuration = durationSeconds > 0 ? durationSeconds : defaultReelDur;
+        boolean attachEndCta = extractBoolean(settings.get("attachEndCta"), true);
+        String brandCta = (settings.containsKey("cta") && settings.get("cta") != null && !settings.get("cta").toString().isBlank())
+                ? extractString(settings.get("cta"))
+                : ((brand != null && brand.getCta() != null && !brand.getCta().isBlank()) ? brand.getCta() : "Download OZO Health app");
+        int carouselSlideCount = extractInt(settings.get("carouselSlideCount"), 6);
 
         PresenterProfileEntity presenter = presenterRepository.findByIsDefaultTrue().orElse(null);
         VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
 
         Map<String, Object> storyboard = aiProviderService.generateScriptAndStoryboard(
-                topic, industry, brandTone, contentType, mode, effectiveDuration, audience, brollCount, brollClipDuration
+                topic, industry, brandTone, contentType, mode, effectiveDuration, audience, brollCount, brollClipDuration,
+                attachEndCta, brandCta, carouselSlideCount
         );
 
         String scriptJson = "";
@@ -308,11 +314,13 @@ public class ContentPostService {
                 };
 
                 for (int i = 0; i < 6; i++) {
+                    String slideTitle = (i == 5 && attachEndCta) ? "Take Action Today" : slideTitles[i];
+                    String slideBody = (i == 5 && attachEndCta) ? (brandCta + ". Save this guide for reference & share with someone who needs this!") : slideContents[i];
                     CarouselSlideEntity slide = CarouselSlideEntity.builder()
                             .postId(post.getId())
                             .slideNumber(i + 1)
-                            .title(slideTitles[i])
-                            .bodyContent(slideContents[i])
+                            .title(slideTitle)
+                            .bodyContent(slideBody)
                             .visualPrompt("Modern minimalist business infographic card")
                             .assetId(null)
                             .imageUrl(null)
@@ -476,11 +484,15 @@ public class ContentPostService {
             BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
             String industry = (brand != null && brand.getIndustry() != null) ? brand.getIndustry() : "HEALTHCARE";
 
+            Map<String, Object> settings = settingsService.getAllSettings();
+            boolean attachEndCta = extractBoolean(settings.get("attachEndCta"), true);
+
             List<CarouselSlideEntity> slides = slideRepository.findByPostIdOrderBySlideNumberAsc(postId);
             for (CarouselSlideEntity slide : slides) {
                 try {
+                    boolean isCtaSlide = attachEndCta && (slide.getSlideNumber() == slides.size());
                     GeneratedAssetEntity slideAsset = aiProviderService.generateCarouselSlideImage(
-                            postId, slide.getSlideNumber(), slide.getTitle(), slide.getBodyContent(), post.getTopic(), industry.toUpperCase()
+                            postId, slide.getSlideNumber(), slide.getTitle(), slide.getBodyContent(), post.getTopic(), industry.toUpperCase(), isCtaSlide
                     );
                     if (slideAsset != null) {
                         slide.setImageUrl(slideAsset.getStorageUrl());
@@ -1040,8 +1052,13 @@ public class ContentPostService {
         // Regenerate slide graphic via AI image model
         ContentPostEntity post = postRepository.findById(postId).orElse(null);
         String topic = post != null ? post.getTopic() : "Healthcare";
+        Map<String, Object> settings = settingsService.getAllSettings();
+        boolean attachEndCta = extractBoolean(settings.get("attachEndCta"), true);
+        List<CarouselSlideEntity> allSlides = slideRepository.findByPostIdOrderBySlideNumberAsc(postId);
+        boolean isCtaSlide = attachEndCta && (slideNumber == allSlides.size());
+
         GeneratedAssetEntity asset = aiProviderService.generateCarouselSlideImage(
-                postId, slideNumber, slide.getTitle(), slide.getBodyContent(), topic, "HEALTHCARE"
+                postId, slideNumber, slide.getTitle(), slide.getBodyContent(), topic, "HEALTHCARE", isCtaSlide
         );
         if (asset != null) {
             slide.setAssetId(asset.getId());
@@ -1101,6 +1118,12 @@ public class ContentPostService {
         } catch (Exception e) {
             return defaultVal;
         }
+    }
+
+    private boolean extractBoolean(Object val, boolean defaultVal) {
+        if (val == null) return defaultVal;
+        if (val instanceof Boolean b) return b;
+        return Boolean.parseBoolean(val.toString().trim());
     }
 
     private double calculateEstimatedCost(ContentType type, PostMode mode, AvatarEngine engine, int duration) {

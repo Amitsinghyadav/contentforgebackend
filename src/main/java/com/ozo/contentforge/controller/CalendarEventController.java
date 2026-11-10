@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/v1/calendar-events")
@@ -70,7 +71,10 @@ public class CalendarEventController {
         String publishTime = (String) req.getOrDefault("publishTime", "11:00 AM");
         Boolean replaceQuota = Boolean.TRUE.equals(req.get("replaceQuota"));
 
-        planService.consumeQuota(null, contentType.name());
+        boolean quotaConsumed = planService.consumeQuota(null, contentType.name());
+        if (!quotaConsumed) {
+            throw new IllegalStateException("All allowed limit already planned. Please delete from Reel Planner.");
+        }
 
         return ResponseEntity.ok(calendarService.createEvent(title, eventDate, recurrence, themeBrief, extraCount,
                 contentType, slideCount, language, mode, publishTime, replaceQuota));
@@ -98,7 +102,13 @@ public class CalendarEventController {
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deleteEvent(@PathVariable("id") Long id) {
-        calendarService.deleteEvent(id);
+        Optional<ContentCalendarEventEntity> eventOpt = calendarService.getEventById(id);
+        if (eventOpt.isPresent()) {
+            ContentCalendarEventEntity event = eventOpt.get();
+            String cType = event.getContentType() != null ? event.getContentType().name() : "REEL";
+            planService.releaseQuota(null, cType);
+            calendarService.deleteEvent(id);
+        }
         return ResponseEntity.noContent().build();
     }
 

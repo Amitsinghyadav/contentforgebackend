@@ -83,9 +83,15 @@ public class ContentBatchService {
         Optional<DailyGenerationBatchEntity> existing = batchRepository.findByTargetDate(date);
         List<ContentPostEntity> existingPosts = postService.getPostsForDate(date);
 
-        // If batch exists and already has generated posts, return existing unless forced
-        if (existing.isPresent() && !existingPosts.isEmpty() && !force) {
-            log.info("Batch already exists for date {} with {} posts.", date, existingPosts.size());
+        // Check Reel Planner Calendar events scheduled for this target date
+        List<ContentCalendarEventEntity> plannedEvents = calendarService.getEventsForDate(date);
+        List<ContentCalendarEventEntity> pendingEvents = plannedEvents.stream()
+                .filter(ev -> !"GENERATED".equalsIgnoreCase(ev.getStatus()))
+                .toList();
+
+        // If batch exists, no pending events remain, and user didn't request a manual format:
+        if (existing.isPresent() && !existingPosts.isEmpty() && pendingEvents.isEmpty() && requestedType == null && !force) {
+            log.info("Batch already exists for date {} with {} posts and no pending events.", date, existingPosts.size());
             return existing.get();
         }
 
@@ -97,9 +103,6 @@ public class ContentBatchService {
         AvatarEngine defaultEngine = defaultEngineStr.contains("III") ? AvatarEngine.AVATAR_III : AvatarEngine.AVATAR_IV;
 
         int durationTarget = ((Number) settings.getOrDefault("reelDurationTarget", 45)).intValue();
-
-        // Check Reel Planner Calendar events scheduled for this target date
-        List<ContentCalendarEventEntity> plannedEvents = calendarService.getEventsForDate(date);
 
         // Pull active domain / business info from Master Settings or Default Brand
         BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
@@ -113,13 +116,8 @@ public class ContentBatchService {
                 ? brand.getTargetAudience()
                 : (String) settings.getOrDefault("targetAudience", "Target customers and community followers");
 
-        int totalNeeded = Math.max(plannedEvents.size(), 1);
+        int totalNeeded = Math.max(pendingEvents.size(), 1);
         List<String> dailyTopics = aiProviderService.generateDailyTopics(industry, targetAudience, brandTone, Math.max(totalNeeded, 5), date);
-
-        // When forced or regenerating, purge stale unpublished/draft posts for this date now that AI succeeded
-        if (force) {
-            postService.purgeUnpublishedPostsForDate(date);
-        }
 
         int plannedReels = 0;
         int plannedPosts = 0;
@@ -144,9 +142,9 @@ public class ContentBatchService {
             throw new RuntimeException("Failed to serialize batch snapshot: " + e.getMessage(), e);
         }
 
-        if (!plannedEvents.isEmpty()) {
-            log.info("Generating batch for date {} relying on {} scheduled items in Reel Planner...", date, plannedEvents.size());
-            for (ContentCalendarEventEntity ev : plannedEvents) {
+        if (!pendingEvents.isEmpty()) {
+            log.info("Generating batch for date {} for {} pending items in Reel Planner (skipping completed)...", date, pendingEvents.size());
+            for (ContentCalendarEventEntity ev : pendingEvents) {
                 ContentType cType = ev.getContentType() != null ? ev.getContentType() : ContentType.REEL;
                 String topic = (ev.getTitle() != null && !ev.getTitle().isBlank() && !ev.getTitle().contains("Daily Preventive Health"))
                         ? ev.getTitle()
@@ -171,7 +169,13 @@ public class ContentBatchService {
                         ev.getLanguage(), ev.getProductionMode(), ev.getPublishTime(), ev.getReplaceQuota(), "GENERATED");
             }
         } else if (requestedType != null) {
-            // User specified what format they want to generate for this empty date
+            // Deduct quota with limit validation
+            boolean quotaDeducted = planService.consumeQuota(null, requestedType.name());
+            if (!quotaDeducted) {
+                throw new IllegalStateException("All allowed limit already planned. Please delete from Reel Planner.");
+            }
+
+            // User specified what format they want to generate for this date (no pending tasks left)
             String chosenTopic;
             if (requestedTopic != null && !requestedTopic.trim().isEmpty()) {
                 chosenTopic = requestedTopic.trim();
@@ -181,10 +185,7 @@ public class ContentBatchService {
                         : "Essential Guidance on " + industry;
             }
 
-            log.info("No items were pre-scheduled for {}. User requested to generate {} on topic: {}", date, requestedType, chosenTopic);
-
-            // Deduct quota
-            planService.consumeQuota(null, requestedType.name());
+            log.info("No pending items for {}. User requested to generate {} on topic: {}", date, requestedType, chosenTopic);
 
             // Register the chosen event on the Reel Planner calendar as GENERATED
             ContentCalendarEventEntity userEvent = calendarService.createEvent(
@@ -203,16 +204,15 @@ public class ContentBatchService {
             else if (requestedType == ContentType.POST) plannedPosts++;
             else if (requestedType == ContentType.CAROUSEL) plannedCarousels++;
         } else {
-            // No events scheduled on Reel Planner, and no content type specified by the user.
-            // Do NOT automatically register any Reel!
-            log.info("No items scheduled in Reel Planner for date {} and no content type specified. Nothing generated.", date);
+            // No pending events scheduled on Reel Planner, and no content type specified by the user.
+            log.info("No pending items scheduled in Reel Planner for date {} and no content type specified. Nothing generated.", date);
             batch.setStatus("NO_SCHEDULED_CONTENT");
             Map<String, Object> emptyCounts = new HashMap<>();
             emptyCounts.put("reels", 0);
             emptyCounts.put("posts", 0);
             emptyCounts.put("carousels", 0);
             emptyCounts.put("totalItems", 0);
-            emptyCounts.put("message", "No content scheduled on Reel Planner for this date.");
+            emptyCounts.put("message", "All tasks for this date are already completed or no items scheduled.");
             try {
                 batch.setPlannedCountsJson(objectMapper.writeValueAsString(emptyCounts));
             } catch (Exception ignored) {}

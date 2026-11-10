@@ -209,19 +209,28 @@ public class AiProviderService {
     public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
                                                            ContentType contentType, PostMode mode,
                                                            int durationSeconds, String targetAudience) {
-        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, 2, 5);
+        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, 2, 5, true, null, 6);
     }
 
     public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
                                                            ContentType contentType, PostMode mode,
                                                            int durationSeconds, String targetAudience,
                                                            int brollCount, int brollClipDuration) {
+        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration, true, null, 6);
+    }
+
+    public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
+                                                           ContentType contentType, PostMode mode,
+                                                           int durationSeconds, String targetAudience,
+                                                           int brollCount, int brollClipDuration,
+                                                           boolean attachEndCta, String brandCtaText,
+                                                           int carouselSlideCount) {
         if (!isRealKey(openAiKey)) {
             throw new IllegalStateException("OpenAI API key is missing or unconfigured. Please configure 'openai.api.key' in application.properties or Master Settings.");
         }
 
         try {
-            return callOpenAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration);
+            return callOpenAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration, attachEndCta, brandCtaText, carouselSlideCount);
         } catch (Exception e) {
             String errorMsg = extractOpenAiErrorMessage(e);
             log.error("OpenAI script and storyboard generation failed: {}", errorMsg);
@@ -232,19 +241,121 @@ public class AiProviderService {
     private Map<String, Object> callOpenAiForStoryboard(String topic, String industry, String brandTone,
                                                          ContentType contentType, PostMode mode,
                                                          int durationSeconds, String targetAudience,
-                                                         int brollCount, int brollClipDuration) throws Exception {
+                                                         int brollCount, int brollClipDuration,
+                                                         boolean attachEndCta, String brandCtaText,
+                                                         int carouselSlideCount) throws Exception {
         String effectiveIndustry = (industry != null && !industry.isBlank()) ? industry : "Business & Lifestyle";
         String effectiveAudience = (targetAudience != null && !targetAudience.isBlank()) ? targetAudience : "Target customers and followers";
         String effectiveTone = (brandTone != null && !brandTone.isBlank()) ? brandTone : "Engaging, authoritative, relatable, and authentic";
+        String effectiveCtaText = (brandCtaText != null && !brandCtaText.isBlank()) ? brandCtaText : "Download OZO Health app";
+        int targetSlideCount = carouselSlideCount > 0 ? carouselSlideCount : 6;
 
         int targetReelDuration = durationSeconds > 0 ? durationSeconds : 45;
-        int targetBrollCount = brollCount >= 0 ? brollCount : 2;
-        int targetBrollDuration = brollClipDuration > 0 ? brollClipDuration : 5;
+        int configuredBrollCount = brollCount >= 0 ? brollCount : 2;
+        int configuredBrollDuration = brollClipDuration > 0 ? brollClipDuration : 5;
+
+        // Dedicated CTA scene duration (if enabled in settings)
+        int ctaDuration = attachEndCta ? Math.min(6, Math.max(4, (int) Math.round(targetReelDuration * 0.25))) : 0;
+        int contentDuration = targetReelDuration - ctaDuration;
+
+        // Dynamic B-roll capping: use settings values, but intelligently cap within contentDuration so presenter hook has enough room
+        int targetBrollDuration = configuredBrollDuration;
+        int targetBrollCount = configuredBrollCount;
+
+        if (targetBrollCount > 0) {
+            int maxTotalBrollSeconds = Math.max(0, (int) Math.round(contentDuration * 0.45));
+            if (targetBrollDuration > maxTotalBrollSeconds && maxTotalBrollSeconds >= 3) {
+                targetBrollDuration = maxTotalBrollSeconds;
+            }
+            int maxAllowedBrolls = (targetBrollDuration > 0) ? (maxTotalBrollSeconds / targetBrollDuration) : 0;
+            if (maxAllowedBrolls < 1 && contentDuration >= 8) {
+                maxAllowedBrolls = 1;
+                targetBrollDuration = Math.min(targetBrollDuration, Math.max(3, contentDuration / 2));
+            }
+            targetBrollCount = Math.min(configuredBrollCount, maxAllowedBrolls);
+        }
+
         int totalBrollSeconds = targetBrollCount * targetBrollDuration;
-        int totalAvatarSeconds = Math.max(10, targetReelDuration - totalBrollSeconds);
-        int avatarSceneCount = targetBrollCount + 1;
-        int approxAvatarDuration = totalAvatarSeconds / avatarSceneCount;
-        int totalScenes = avatarSceneCount + targetBrollCount;
+        int totalContentAvatarSeconds = Math.max(4, contentDuration - totalBrollSeconds);
+        int contentAvatarCount = (targetBrollCount > 0 && contentDuration > 12) ? (targetBrollCount + 1) : 1;
+        int approxContentAvatarDuration = Math.max(3, totalContentAvatarSeconds / contentAvatarCount);
+
+        // Total scenes = content avatar scenes + broll scenes + (1 dedicated CTA scene if enabled)
+        int totalScenes = contentAvatarCount + targetBrollCount + (attachEndCta ? 1 : 0);
+
+        // Word budget strictly computed at ~2.1 words per second (natural human speech rate with pauses)
+        int maxSpokenWords = Math.max(20, (int) Math.round(targetReelDuration * 2.1));
+
+        // Build dynamic scene breakdown and word budget per scene
+        StringBuilder timelineBuilder = new StringBuilder();
+        int runningTimelineStart = 0;
+        int curBrollNum = 1;
+        int curAvatarNum = 1;
+        int scenesBeforeCta = totalScenes - (attachEndCta ? 1 : 0);
+
+        for (int s = 1; s <= scenesBeforeCta; s++) {
+            boolean isBrollScene = (targetBrollCount > 0) && (s % 2 == 0) && (curBrollNum <= targetBrollCount);
+            int sceneDur = isBrollScene ? targetBrollDuration : approxContentAvatarDuration;
+            if (s == scenesBeforeCta && !attachEndCta) {
+                sceneDur = Math.max(3, targetReelDuration - runningTimelineStart);
+            } else if (s == scenesBeforeCta) {
+                sceneDur = Math.max(3, contentDuration - runningTimelineStart);
+            }
+            int sceneWordBudget = Math.max(4, (int) Math.round(sceneDur * 2.1));
+            String sceneType = isBrollScene ? "BROLL" : "AVATAR";
+            String sceneDesc;
+            if (s == 1) {
+                sceneDesc = "Opening Hook + Problem Setup";
+            } else if (isBrollScene) {
+                sceneDesc = "Cinematic B-roll Visual Cutaway #" + (curBrollNum++);
+            } else {
+                sceneDesc = "Core Insight / Solution #" + (curAvatarNum++);
+            }
+
+            timelineBuilder.append(String.format("   - Scene %d: %s (%s, duration: exactly %d seconds, max ~%d spoken words)\n",
+                    s, sceneType, sceneDesc, sceneDur, sceneWordBudget));
+            runningTimelineStart += sceneDur;
+        }
+
+        if (attachEndCta) {
+            int finalCtaDur = Math.max(3, targetReelDuration - runningTimelineStart);
+            int ctaWordBudget = Math.max(4, (int) Math.round(finalCtaDur * 2.1));
+            timelineBuilder.append(String.format("   - Scene %d: AVATAR (DEDICATED BRAND CALL-TO-ACTION (CTA) END SCENE, duration: exactly %d seconds, max ~%d spoken words - Presenter explicitly speaks CTA: \"%s\")\n",
+                    totalScenes, finalCtaDur, ctaWordBudget, effectiveCtaText));
+        }
+        String timelineStructure = timelineBuilder.toString();
+
+        String ctaReelRules;
+        if (attachEndCta) {
+            ctaReelRules = String.format("""
+               - End Call-To-Action (CTA) is ENABLED in settings.
+               - Scene %d MUST be a dedicated Brand Call-To-Action (CTA) ending scene!
+               - In Scene %d "spokenText", the presenter MUST explicitly speak this Call-To-Action in conversational Hinglish: "%s" (e.g. "Abhi OZO Health app download karo aur daily preventive insights pao! Follow & share this reel!").
+               - The presenterScript MUST include this spoken CTA so ElevenLabs generates it in the voiceover audio track.
+               - In Scene %d "visualPrompt", depict the presenter warmly smiling at the camera and pointing to the animated app download / follow badge on screen.
+               """, totalScenes, totalScenes, effectiveCtaText, totalScenes);
+        } else {
+            ctaReelRules = """
+               - End Call-To-Action (CTA) is DISABLED in settings.
+               - Do NOT add a dedicated CTA scene or promotional pitch at the end.
+               - Conclude the reel naturally with the final educational takeaway or insight.
+               """;
+        }
+
+        String ctaCarouselRules;
+        if (attachEndCta) {
+            ctaCarouselRules = String.format("""
+               - End Call-To-Action (CTA) is ENABLED in settings.
+               - Slide %d (the final slide) MUST be a dedicated Brand Call-To-Action (CTA) end slide!
+               - Slide %d "title": High-impact action headline (e.g. "Take Action with %s").
+               - Slide %d "body": Direct actionable instructions incorporating: "%s". Explicitly tell the user to download the app, save this post for reference, and share with someone who needs it.
+               """, targetSlideCount, targetSlideCount, effectiveIndustry, targetSlideCount, effectiveCtaText);
+        } else {
+            ctaCarouselRules = String.format("""
+               - End Call-To-Action (CTA) is DISABLED in settings.
+               - Slide %d (the final slide) is a regular summary of key takeaways. Do NOT add a promotional app download card.
+               """, targetSlideCount);
+        }
 
         String prompt = String.format("""
             You are a premier Instagram video and content strategist for an automated social media engine.
@@ -256,24 +367,31 @@ public class AiProviderService {
             Target Reel Duration: %d seconds
             Topic: %s
 
-            SCENE COMPOSITION RULES FOR REELS:
+            SCENE COMPOSITION RULES FOR REELS (If Content Type is REEL):
             1. Total Reel duration MUST be exactly %d seconds.
-            2. The reel must contain exactly %d B-roll cutaway scene(s) (each lasting exactly %d seconds) and %d Avatar presenter scene(s). Total scenes = %d.
-            3. Alternating timeline structure:
-               - Scene 1: AVATAR (Opening 1-3s Hook + Problem context, ~%d seconds)
-               - Scene 2: BROLL (Cinematic visual demonstration #1, exactly %d seconds)
-               - Scene 3: AVATAR (Core explanation, science, or deep-dive solution, ~%d seconds)
-               %s
-               - Final Scene (Scene %d): AVATAR (Closing summary, actionable advice, and final Brand Call-To-Action (CTA), ~%d seconds)
-            4. CRITICAL RULE FOR B-ROLL VISUAL PROMPTS:
+            2. CRITICAL SPOKEN WORD BUDGET (STRICT TIMING CONSTRAINT):
+               - Total spoken words across all scenes combined MUST NOT EXCEED %d words in total!
+               - Speech speed is ~2.1 words/sec. Writing more than %d words WILL CAUSE the audio track to exceed %d seconds.
+               - Every scene's "spokenText" MUST be exactly 1 concise, punchy sentence strictly respecting its scene word limit.
+               - Do NOT write conversational filler phrases or lengthy introductions.
+            3. The reel must contain exactly %d scenes matching this timeline structure:
+%s
+            4. REEL CALL-TO-ACTION (CTA) RULES:
+%s
+            5. CRITICAL RULE FOR B-ROLL VISUAL PROMPTS:
                - NEVER output generic placeholders like "capturing key concept of scene 2" or "b-roll related to topic".
                - Write a vivid, cinematic 9:16 vertical Runway text-to-video prompt detailing what is physically seen on camera (specific subjects, equipment, environment, lighting, camera glide, depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
-            5. CRITICAL RULE FOR SPOKEN TEXT:
+            6. CRITICAL RULE FOR SPOKEN TEXT:
                - Every scene (both AVATAR and BROLL) MUST have a specific "spokenText" field.
                - For B-roll scenes, "spokenText" is the voiceover narration spoken while that B-roll is visible.
                - Language: Natural Indian Hinglish (conversational Hindi with natural English terminology).
                - When all "spokenText" fields from Scene 1 to Scene %d are read sequentially, they form one seamless, continuous narration track for the entire %d-second video.
-            6. Ending: The final scene MUST end with a compelling Call-To-Action (CTA) suitable for %s.
+               - Combined word count across all scenes MUST NOT exceed %d words!
+
+            CAROUSEL COMPOSITION RULES (If Content Type is CAROUSEL):
+            1. Generate exactly %d slides in the "slides" array.
+            2. CAROUSEL CALL-TO-ACTION (CTA) RULES:
+%s
 
             Generate a complete structured JSON with:
             {
@@ -285,7 +403,7 @@ public class AiProviderService {
               "voiceoverScript": "Full spoken voiceover narration (combined text of all BROLL scenes)",
               "caption": "Engaging Instagram caption with bullet points and emojis tailored to %s",
               "hashtags": "5 to 8 relevant hashtags matching %s and %s",
-              "cta": "Clear call to action suited for %s",
+              "cta": "%s",
               "clinicalReviewRequired": false,
               "scenes": [
                  {
@@ -296,15 +414,6 @@ public class AiProviderService {
                    "spokenText": "Opening hook and problem statement in natural Hinglish...",
                    "visualPrompt": "Confident presenter looking directly into the camera in a modern studio with soft warm rim lighting and shallow depth of field",
                    "cameraDirection": "Slow gentle push-in"
-                 },
-                 {
-                   "sceneNumber": 2,
-                   "type": "BROLL",
-                   "startSeconds": %d,
-                   "durationSeconds": %d,
-                   "spokenText": "Voiceover narration explaining the visual concept...",
-                   "visualPrompt": "Cinematic vertical 9:16 4K macro shot of [specific subjects, equipment, and motion matching the scene's narration], soft volumetric studio lighting, shallow depth of field, 24fps motion blur",
-                   "cameraDirection": "Cinematic slow glide"
                  }
               ],
               "slides": [
@@ -312,48 +421,26 @@ public class AiProviderService {
                    "slideNumber": 1,
                    "title": "Title for Slide 1",
                    "body": "Punchy educational description for slide 1"
-                 },
-                 {
-                   "slideNumber": 2,
-                   "title": "Title for Slide 2",
-                   "body": "Punchy educational description for slide 2"
-                 },
-                 {
-                   "slideNumber": 3,
-                   "title": "Title for Slide 3",
-                   "body": "Punchy educational description for slide 3"
-                 },
-                 {
-                   "slideNumber": 4,
-                   "title": "Title for Slide 4",
-                   "body": "Punchy educational description for slide 4"
-                 },
-                 {
-                   "slideNumber": 5,
-                   "title": "Title for Slide 5",
-                   "body": "Punchy educational description for slide 5"
-                 },
-                 {
-                   "slideNumber": 6,
-                   "title": "Title for Slide 6",
-                   "body": "Summary and call to action for slide 6"
                  }
               ]
             }
-            Ensure the "scenes" array contains all %d scenes alternating between AVATAR and BROLL, with exact startSeconds and durationSeconds summing to %d.
+            Ensure the "scenes" array contains exactly all %d scenes matching the timeline structure above, with exact startSeconds and durationSeconds summing to %d.
+            Ensure the "slides" array contains exactly %d slides.
             Output only raw valid JSON without markdown fences.
             """,
             effectiveIndustry, effectiveAudience, effectiveTone, contentType, mode, targetReelDuration, topic,
-            targetReelDuration, targetBrollCount, targetBrollDuration, avatarSceneCount, totalScenes,
-            approxAvatarDuration, targetBrollDuration, approxAvatarDuration,
-            targetBrollCount >= 2 ? String.format("- Scene 4: BROLL (Cinematic visual demonstration #2, exactly %d seconds)", targetBrollDuration) : "",
-            totalScenes, approxAvatarDuration,
+            targetReelDuration,
+            maxSpokenWords, maxSpokenWords, targetReelDuration,
+            totalScenes,
+            timelineStructure,
+            ctaReelRules,
+            totalScenes, targetReelDuration, maxSpokenWords,
+            targetSlideCount,
+            ctaCarouselRules,
+            contentType, targetReelDuration, topic, topic, topic, effectiveIndustry, effectiveCtaText,
+            approxContentAvatarDuration,
             totalScenes, targetReelDuration,
-            topic,
-            contentType, targetReelDuration, topic, topic, topic, effectiveIndustry, topic,
-            approxAvatarDuration,
-            approxAvatarDuration, targetBrollDuration,
-            totalScenes, targetReelDuration);
+            targetSlideCount);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -414,20 +501,36 @@ public class AiProviderService {
     }
 
     public GeneratedAssetEntity generateCarouselSlideImage(Long postId, int slideNumber, String title, String bodyContent, String topic, String industry) throws Exception {
-        log.info("Generating AI Carousel Slide {} image for post {} (title: '{}')...", slideNumber, postId, title);
+        return generateCarouselSlideImage(postId, slideNumber, title, bodyContent, topic, industry, false);
+    }
+
+    public GeneratedAssetEntity generateCarouselSlideImage(Long postId, int slideNumber, String title, String bodyContent, String topic, String industry, boolean isCtaSlide) throws Exception {
+        log.info("Generating AI Carousel Slide {} image for post {} (title: '{}', isCtaSlide: {})...", slideNumber, postId, title, isCtaSlide);
         String cleanTopic = (topic != null && !topic.isBlank()) ? topic : "Healthcare";
         String cleanIndustry = (industry != null && !industry.isBlank()) ? industry : "Healthcare";
         String cleanTitle = (title != null && !title.isBlank()) ? title : ("Slide " + slideNumber);
         String cleanBody = (bodyContent != null && !bodyContent.isBlank()) ? bodyContent : cleanTopic;
 
-        String effectivePrompt = String.format(
-                "A professionally designed social media carousel presentation card for %s about '%s'. " +
-                "Prominently render bold, crisp typography displaying the slide title: \"%s\". " +
-                "Include clean, legible subtitle text: \"%s\". " +
-                "Incorporate modern, high-quality medical/scientific 3D illustrations or iconography matching the topic. " +
-                "Well-balanced graphic poster layout with polished typography, beautiful color harmony, 1024x1024 square.",
-                cleanIndustry, cleanTopic, cleanTitle, cleanBody
-        );
+        String effectivePrompt;
+        if (isCtaSlide) {
+            effectivePrompt = String.format(
+                    "A high-impact concluding Call-To-Action (CTA) presentation slide for social media carousel for %s. " +
+                    "Prominently display clean, bold modern typography featuring the main action headline: \"%s\". " +
+                    "Include distinct, inspiring call-to-action text: \"%s\". " +
+                    "Feature sleek modern action iconography such as mobile app store badge, save bookmark icon, and follow/share symbols. " +
+                    "Professional branded presentation slide layout, 1024x1024 square, clean negative space, elegant color harmony.",
+                    cleanIndustry, cleanTitle, cleanBody
+            );
+        } else {
+            effectivePrompt = String.format(
+                    "A professionally designed social media carousel presentation card for %s about '%s'. " +
+                    "Prominently render bold, crisp typography displaying the slide title: \"%s\". " +
+                    "Include clean, legible subtitle text: \"%s\". " +
+                    "Incorporate modern, high-quality medical/scientific 3D illustrations or iconography matching the topic. " +
+                    "Well-balanced graphic poster layout with polished typography, beautiful color harmony, 1024x1024 square.",
+                    cleanIndustry, cleanTopic, cleanTitle, cleanBody
+            );
+        }
 
         return callOpenAiImageGeneration(postId, effectivePrompt, "GENERATE_CAROUSEL_SLIDE_" + slideNumber);
     }
