@@ -207,17 +207,60 @@ public class AiProviderService {
     // =========================================================================
     // 1. OPENAI: SCRIPT & STORYBOARD GENERATION
     // =========================================================================
+    public static class VideoDimensions {
+        public final int width;
+        public final int height;
+        public final int heygenWidth;
+        public final int heygenHeight;
+        public final String runwayRatio;
+        public final String resolution;
+        public final int logoWidth;
+        public final int logoX;
+        public final int logoY;
+        public final int captionMarginV;
+        public final int captionFontSize;
+
+        public VideoDimensions(int width, int height, int heygenWidth, int heygenHeight, String runwayRatio,
+                               String resolution, int logoWidth, int logoX, int logoY, int captionMarginV, int captionFontSize) {
+            this.width = width;
+            this.height = height;
+            this.heygenWidth = heygenWidth;
+            this.heygenHeight = heygenHeight;
+            this.runwayRatio = runwayRatio;
+            this.resolution = resolution;
+            this.logoWidth = logoWidth;
+            this.logoX = logoX;
+            this.logoY = logoY;
+            this.captionMarginV = captionMarginV;
+            this.captionFontSize = captionFontSize;
+        }
+
+        public static VideoDimensions fromAspectRatio(String ratio) {
+            String clean = (ratio != null) ? ratio.trim() : "9:16";
+            if ("1:1".equals(clean) || "SQUARE".equalsIgnoreCase(clean)) {
+                // 1:1 Square (1080x1080): Instagram Feed Post / Carousel
+                return new VideoDimensions(1080, 1080, 1080, 1080, "720:1280", "1080x1080", 150, 35, 35, 100, 50);
+            } else if ("16:9".equals(clean) || "LANDSCAPE".equalsIgnoreCase(clean)) {
+                // 16:9 Landscape (1920x1080): YouTube / Desktop / TV
+                return new VideoDimensions(1920, 1080, 1280, 720, "1280:720", "1920x1080", 200, 50, 50, 120, 54);
+            } else {
+                // 9:16 Vertical (1080x1920): Instagram Reels / Shorts / TikTok (default)
+                return new VideoDimensions(1080, 1920, 720, 1280, "720:1280", "1080x1920", 180, 40, 50, 420, 62);
+            }
+        }
+    }
+
     public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
                                                            ContentType contentType, PostMode mode,
                                                            int durationSeconds, String targetAudience) {
-        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, 2, 5, true, null, 6);
+        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, 2, 5, true, null, 6, "9:16");
     }
 
     public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
                                                            ContentType contentType, PostMode mode,
                                                            int durationSeconds, String targetAudience,
                                                            int brollCount, int brollClipDuration) {
-        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration, true, null, 6);
+        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration, true, null, 6, "9:16");
     }
 
     public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
@@ -226,12 +269,23 @@ public class AiProviderService {
                                                            int brollCount, int brollClipDuration,
                                                            boolean attachEndCta, String brandCtaText,
                                                            int carouselSlideCount) {
+        return generateScriptAndStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience,
+                brollCount, brollClipDuration, attachEndCta, brandCtaText, carouselSlideCount, "9:16");
+    }
+
+    public Map<String, Object> generateScriptAndStoryboard(String topic, String industry, String brandTone,
+                                                           ContentType contentType, PostMode mode,
+                                                           int durationSeconds, String targetAudience,
+                                                           int brollCount, int brollClipDuration,
+                                                           boolean attachEndCta, String brandCtaText,
+                                                           int carouselSlideCount, String videoAspectRatio) {
         if (!isRealKey(openAiKey)) {
             throw new IllegalStateException("OpenAI API key is missing or unconfigured. Please configure 'openai.api.key' in application.properties or Master Settings.");
         }
 
         try {
-            return callOpenAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience, brollCount, brollClipDuration, attachEndCta, brandCtaText, carouselSlideCount);
+            return callOpenAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience,
+                    brollCount, brollClipDuration, attachEndCta, brandCtaText, carouselSlideCount, videoAspectRatio);
         } catch (Exception e) {
             String errorMsg = extractOpenAiErrorMessage(e);
             log.error("OpenAI script and storyboard generation failed: {}", errorMsg);
@@ -244,12 +298,18 @@ public class AiProviderService {
                                                          int durationSeconds, String targetAudience,
                                                          int brollCount, int brollClipDuration,
                                                          boolean attachEndCta, String brandCtaText,
-                                                         int carouselSlideCount) throws Exception {
+                                                         int carouselSlideCount, String videoAspectRatio) throws Exception {
         String effectiveIndustry = (industry != null && !industry.isBlank()) ? industry : "Business & Lifestyle";
         String effectiveAudience = (targetAudience != null && !targetAudience.isBlank()) ? targetAudience : "Target customers and followers";
         String effectiveTone = (brandTone != null && !brandTone.isBlank()) ? brandTone : "Engaging, authoritative, relatable, and authentic";
         String effectiveCtaText = (brandCtaText != null && !brandCtaText.isBlank()) ? brandCtaText : "Download OZO Health app";
         int targetSlideCount = carouselSlideCount > 0 ? carouselSlideCount : 6;
+        String effectiveAspectRatio = (videoAspectRatio != null && !videoAspectRatio.isBlank()) ? videoAspectRatio.trim() : "9:16";
+        String ratioDescription = "1:1".equals(effectiveAspectRatio)
+                ? "1:1 Square (Instagram Feed Post / Carousel)"
+                : "16:9".equals(effectiveAspectRatio)
+                ? "16:9 Widescreen Landscape (YouTube / Desktop / TV)"
+                : "9:16 Vertical Portrait (Instagram Reels / Shorts / TikTok)";
 
         int targetReelDuration = durationSeconds > 0 ? durationSeconds : 45;
         int configuredBrollCount = brollCount >= 0 ? brollCount : 2;
@@ -373,6 +433,7 @@ public class AiProviderService {
             Content type: %s
             Production mode: %s
             Target Reel Duration: %d seconds
+            Video Aspect Ratio: %s (%s)
             Topic: %s
 
             SCENE COMPOSITION RULES FOR REELS (If Content Type is REEL):
@@ -389,7 +450,7 @@ public class AiProviderService {
 %s
             5. CRITICAL RULE FOR B-ROLL VISUAL PROMPTS:
                - NEVER output generic placeholders like "capturing key concept of scene 2" or "b-roll related to topic".
-               - Write a vivid, cinematic 9:16 vertical Runway text-to-video prompt detailing what is physically seen on camera (specific subjects, equipment, environment, lighting, camera glide, depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
+               - Write a vivid, cinematic %s (%s) Runway text-to-video prompt detailing what is physically seen on camera (specific subjects, equipment, environment, lighting, camera glide, depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
             6. CRITICAL RULE FOR SPOKEN TEXT:
                - Every scene (both AVATAR and BROLL) MUST have a specific "spokenText" field.
                - For B-roll scenes, "spokenText" is the voiceover narration spoken while that B-roll is visible.
@@ -420,6 +481,7 @@ public class AiProviderService {
                    "type": "AVATAR",
                    "startSeconds": 0,
                    "durationSeconds": %d,
+                   "aspectRatio": "%s",
                    "spokenText": "Opening hook and problem statement in natural Hinglish...",
                    "visualPrompt": "Confident presenter looking directly into the camera in a modern studio with soft warm rim lighting and shallow depth of field",
                    "cameraDirection": "Slow gentle push-in"
@@ -437,18 +499,19 @@ public class AiProviderService {
             Ensure the "slides" array contains exactly %d slides.
             Output only raw valid JSON without markdown fences.
             """,
-            effectiveIndustry, effectiveAudience, effectiveTone, contentType, mode, targetReelDuration, topic,
+            effectiveIndustry, effectiveAudience, effectiveTone, contentType, mode, targetReelDuration, effectiveAspectRatio, ratioDescription, topic,
             targetReelDuration,
             targetReelDuration, minSpokenWords, maxSpokenWords, targetSpokenWords, minSpokenWords, minSpokenWords, targetReelDuration,
             totalScenes,
             timelineStructure,
             ctaReelRules,
+            effectiveAspectRatio, ratioDescription,
             totalScenes, targetReelDuration,
             minSpokenWords, maxSpokenWords, targetSpokenWords, minSpokenWords,
             targetSlideCount,
             ctaCarouselRules,
             contentType, targetReelDuration, topic, topic, topic, effectiveIndustry, effectiveCtaText,
-            approxContentAvatarDuration,
+            approxContentAvatarDuration, effectiveAspectRatio,
             totalScenes, targetReelDuration,
             targetSlideCount);
 
@@ -1407,9 +1470,20 @@ public class AiProviderService {
                     log.info("No active default background selected. Preserving avatar's native trained video background.");
                 }
 
+                String videoAspectRatio = "9:16";
+                if (masterSettingsService != null) {
+                    try {
+                        Map<String, Object> settings = masterSettingsService.getAllSettings();
+                        if (settings.containsKey("videoAspectRatio") && settings.get("videoAspectRatio") != null) {
+                            videoAspectRatio = String.valueOf(settings.get("videoAspectRatio")).trim();
+                        }
+                    } catch (Exception ignored) {}
+                }
+                VideoDimensions dims = VideoDimensions.fromAspectRatio(videoAspectRatio);
+
                 Map<String, Object> payload = new HashMap<>();
                 payload.put("video_inputs", List.of(input));
-                payload.put("dimension", Map.of("width", 720, "height", 1280));
+                payload.put("dimension", Map.of("width", dims.heygenWidth, "height", dims.heygenHeight));
 
                 HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
                 ResponseEntity<String> response = restTemplate.postForEntity(targetUrl, entity, String.class);
@@ -1598,11 +1672,23 @@ public class AiProviderService {
             headers.set("X-Runway-Version", "2024-11-06");
             headers.setContentType(MediaType.APPLICATION_JSON);
 
+            String videoAspectRatio = "9:16";
+            if (masterSettingsService != null) {
+                try {
+                    Map<String, Object> settings = masterSettingsService.getAllSettings();
+                    if (settings.containsKey("videoAspectRatio") && settings.get("videoAspectRatio") != null) {
+                        videoAspectRatio = String.valueOf(settings.get("videoAspectRatio")).trim();
+                    }
+                } catch (Exception ignored) {}
+            }
+            VideoDimensions dims = VideoDimensions.fromAspectRatio(videoAspectRatio);
+
             Map<String, Object> body = new HashMap<>();
             body.put("model", runwayModel);
             body.put("promptText", promptText);
-            body.put("ratio", "720:1280");
-            body.put("duration", durationSeconds);
+            body.put("ratio", dims.runwayRatio);
+            int runwayDuration = (durationSeconds > 7) ? 10 : 5;
+            body.put("duration", runwayDuration);
 
             if (inputImageUrl != null && !inputImageUrl.isBlank()) {
                 String signedImageUrl = storageService.getPresignedUrl(inputImageUrl, Duration.ofHours(24));
@@ -1750,9 +1836,7 @@ public class AiProviderService {
     public GeneratedAssetEntity compositeVideo(Long postId, int totalDurationSeconds, String topic,
                                                String avatarVideoUrl, List<ContentSceneEntity> scenes,
                                                String spokenScript) throws Exception {
-        log.info("Compositing final 9:16 vertical Reel for post {}...", postId);
-        MediaJobEntity job = recordJob(postId, null, JobProvider.FFMPEG, "COMPOSITE_VIDEO");
-
+        String videoAspectRatio = "9:16";
         String brandLogoUrl = null;
         boolean subtitlesEnabled = false;
         String captionLanguage = "Hinglish";
@@ -1770,8 +1854,16 @@ public class AiProviderService {
                 if (langObj != null && !String.valueOf(langObj).isBlank()) {
                     captionLanguage = String.valueOf(langObj).trim();
                 }
+                Object ratioObj = settings.get("videoAspectRatio");
+                if (ratioObj != null && !String.valueOf(ratioObj).isBlank()) {
+                    videoAspectRatio = String.valueOf(ratioObj).trim();
+                }
             } catch (Exception ignored) {}
         }
+        VideoDimensions dims = VideoDimensions.fromAspectRatio(videoAspectRatio);
+
+        log.info("Compositing final {} ({}) video Reel for post {}...", videoAspectRatio, dims.resolution, postId);
+        MediaJobEntity job = recordJob(postId, null, JobProvider.FFMPEG, "COMPOSITE_VIDEO");
 
         String effectiveSpokenScript = (spokenScript != null && !spokenScript.isBlank())
                 ? spokenScript.trim()
@@ -1786,7 +1878,8 @@ public class AiProviderService {
 
         boolean needsComposite = !brollScenes.isEmpty()
                 || (brandLogoUrl != null && !brandLogoUrl.isBlank())
-                || subtitlesEnabled;
+                || subtitlesEnabled
+                || !"9:16".equals(videoAspectRatio);
 
         if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && needsComposite) {
             try {
@@ -1794,7 +1887,8 @@ public class AiProviderService {
                 if (ffmpegBin != null) {
                     finalUrl = executeFfmpegComposite(
                             ffmpegBin, postId, totalDurationSeconds, avatarVideoUrl,
-                            brollScenes, brandLogoUrl, subtitlesEnabled, captionLanguage, effectiveSpokenScript
+                            brollScenes, brandLogoUrl, subtitlesEnabled, captionLanguage, effectiveSpokenScript,
+                            dims
                     );
                 }
             } catch (Exception e) {
@@ -1815,8 +1909,8 @@ public class AiProviderService {
                 .mimeType("video/mp4")
                 .durationSeconds((double) totalDurationSeconds)
                 .metadataJson(String.format(
-                        "{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d,\"captionsEnabled\":%s,\"captionLanguage\":\"%s\"}",
-                        postId, topic != null ? topic.replace("\"", "'") : "", brollScenes.size() + 1, subtitlesEnabled, captionLanguage))
+                        "{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d,\"captionsEnabled\":%s,\"captionLanguage\":\"%s\",\"aspectRatio\":\"%s\",\"resolution\":\"%s\"}",
+                        postId, topic != null ? topic.replace("\"", "'") : "", brollScenes.size() + 1, subtitlesEnabled, captionLanguage, videoAspectRatio, dims.resolution))
                 .createdAt(LocalDateTime.now())
                 .build();
     }
@@ -1850,7 +1944,7 @@ public class AiProviderService {
     private String executeFfmpegComposite(String ffmpegBin, Long postId, int totalDurationSeconds, String avatarUrl,
                                           List<ContentSceneEntity> brolls, String brandLogoUrl,
                                           boolean subtitlesEnabled, String captionLanguage,
-                                          String spokenScript) throws Exception {
+                                          String spokenScript, VideoDimensions dims) throws Exception {
         Path tempDir = Files.createTempDirectory("comp_post_" + postId + "_");
         Process proc = null;
         try {
@@ -1888,7 +1982,7 @@ public class AiProviderService {
                     extractAudioForCaptions(ffmpegBin, avatarFile, audioFile);
                     List<CaptionCue> cues = buildCaptionCues(postId, audioFile, totalDurationSeconds, spokenScript, captionLanguage);
                     if (!cues.isEmpty()) {
-                        String assContent = buildAssSubtitles(cues);
+                        String assContent = buildAssSubtitles(cues, dims);
                         Path assFile = tempDir.resolve("captions.ass");
                         Files.writeString(assFile, assContent, StandardCharsets.UTF_8);
                         hasAssCaptions = Files.exists(assFile) && Files.size(assFile) > 0;
@@ -1922,14 +2016,15 @@ public class AiProviderService {
             }
 
             StringBuilder filter = new StringBuilder();
-            // Conform base avatar video to standard 1080x1920 9:16
-            filter.append("[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v0];");
+            // Conform base avatar video to standard dimensions (9:16, 1:1, or 16:9)
+            filter.append(String.format("[0:v]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1[v0];",
+                    dims.width, dims.height, dims.width, dims.height));
 
             for (int i = 0; i < brolls.size(); i++) {
                 ContentSceneEntity sc = brolls.get(i);
                 int start = sc.getStartTimeSeconds() != null ? sc.getStartTimeSeconds() : (10 + i * 15);
-                filter.append(String.format("[%d:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,setpts=PTS-STARTPTS+%d/TB[b%d];",
-                        i + 1, start, i + 1));
+                filter.append(String.format("[%d:v]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,setpts=PTS-STARTPTS+%d/TB[b%d];",
+                        i + 1, dims.width, dims.height, dims.width, dims.height, start, i + 1));
             }
 
             String currentBase = "[v0]";
@@ -1946,8 +2041,9 @@ public class AiProviderService {
             String preCaptionPad = currentBase;
             if (logoInputIdx != -1) {
                 preCaptionPad = "[v_logo]";
-                filter.append(String.format("[%d:v]scale=180:-1[logo_scaled];", logoInputIdx));
-                filter.append(String.format("%s[logo_scaled]overlay=main_w-overlay_w-40:50:format=auto%s;", currentBase, preCaptionPad));
+                filter.append(String.format("[%d:v]scale=%d:-1[logo_scaled];", logoInputIdx, dims.logoWidth));
+                filter.append(String.format("%s[logo_scaled]overlay=main_w-overlay_w-%d:%d:format=auto%s;",
+                        currentBase, dims.logoX, dims.logoY, preCaptionPad));
             }
 
             if (hasAssCaptions) {
@@ -2275,21 +2371,20 @@ public class AiProviderService {
         }
     }
 
-    private String buildAssSubtitles(List<CaptionCue> cues) {
+    private String buildAssSubtitles(List<CaptionCue> cues, VideoDimensions dims) {
         StringBuilder ass = new StringBuilder();
         ass.append("[Script Info]\n");
         ass.append("ScriptType: v4.00+\n");
-        ass.append("PlayResX: 1080\n");
-        ass.append("PlayResY: 1920\n");
+        ass.append("PlayResX: ").append(dims.width).append("\n");
+        ass.append("PlayResY: ").append(dims.height).append("\n");
         ass.append("WrapStyle: 0\n");
         ass.append("ScaledBorderAndShadow: yes\n\n");
 
-        // MarginV=420 keeps captions cleanly above Instagram Reels bottom UI footer (~bottom 380px)
-        // MarginL=90, MarginR=90 avoids right-side Like/Comment/Share buttons
-        // Nirmala UI supports both Devanagari (Hindi) and Latin (English/Hinglish) cleanly
         ass.append("[V4+ Styles]\n");
         ass.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
-        ass.append("Style: Default,Nirmala UI,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,1,5,2,2,90,90,420,1\n\n");
+        ass.append(String.format(
+                "Style: Default,Nirmala UI,%d,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,1,5,2,2,90,90,%d,1\n\n",
+                dims.captionFontSize, dims.captionMarginV));
 
         ass.append("[Events]\n");
         ass.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");

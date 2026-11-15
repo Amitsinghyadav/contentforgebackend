@@ -61,6 +61,13 @@ public class MasterSettingsService {
         }
 
         try {
+            if (newSettings != null) {
+                if (newSettings.containsKey("videoAspectRatio")) {
+                    newSettings.put("brollOutputRatio", newSettings.get("videoAspectRatio"));
+                } else if (newSettings.containsKey("brollOutputRatio")) {
+                    newSettings.put("videoAspectRatio", newSettings.get("brollOutputRatio"));
+                }
+            }
             String newJson = objectMapper.writeValueAsString(newSettings);
             entity.setSettingValueJson(newJson);
             entity.setUpdatedBy(actorId != null ? actorId : "admin");
@@ -105,6 +112,7 @@ public class MasterSettingsService {
         s.put("reelDurationTarget", 45);
         s.put("productionMode", "Mode A"); // Mode A or Mode B
         s.put("avatarEngine", "Avatar IV"); // Avatar III or Avatar IV
+        s.put("videoAspectRatio", "9:16"); // "9:16" (Vertical), "1:1" (Square), "16:9" (Landscape)
         s.put("brollModel", "Runway Gen-4.5");
         s.put("brollCount", 2);
         s.put("brollClipDuration", 5);

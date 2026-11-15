@@ -165,12 +165,13 @@ public class ContentPostService {
                 : ((brand != null && brand.getCta() != null && !brand.getCta().isBlank()) ? brand.getCta() : "Download OZO Health app");
         int carouselSlideCount = extractInt(settings.get("carouselSlideCount"), 6);
 
+        String videoAspectRatio = extractString(settings.getOrDefault("videoAspectRatio", "9:16"));
         PresenterProfileEntity presenter = presenterRepository.findByIsDefaultTrue().orElse(null);
         VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
 
         Map<String, Object> storyboard = aiProviderService.generateScriptAndStoryboard(
                 topic, industry, brandTone, contentType, mode, effectiveDuration, audience, brollCount, brollClipDuration,
-                attachEndCta, brandCta, carouselSlideCount
+                attachEndCta, brandCta, carouselSlideCount, videoAspectRatio
         );
 
         String scriptJson = "";
@@ -225,9 +226,9 @@ public class ContentPostService {
                     String spoken = extractString(sMap.get("spokenText"));
                     String promptText = extractString(sMap.get("visualPrompt"));
                     String camDir = extractString(sMap.get("cameraDirection"));
-                    if (camDir.isBlank()) camDir = "Cinematic 9:16";
+                    if (camDir.isBlank()) camDir = "Cinematic " + videoAspectRatio;
                     String aspect = extractString(sMap.get("aspectRatio"));
-                    if (aspect.isBlank()) aspect = "9:16";
+                    if (aspect.isBlank()) aspect = videoAspectRatio;
 
                     ContentSceneEntity scene = ContentSceneEntity.builder()
                             .postId(post.getId())
@@ -676,11 +677,14 @@ public class ContentPostService {
             );
 
             // Record Video Render
+            String renderRatio = extractString(settingsService.getAllSettings().getOrDefault("videoAspectRatio", "9:16"));
+            AiProviderService.VideoDimensions renderDims = AiProviderService.VideoDimensions.fromAspectRatio(renderRatio);
+
             renderRepository.save(VideoRenderEntity.builder()
                     .postId(postId)
                     .storageUrl(renderAsset.getStorageUrl())
                     .durationSeconds((double) (post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45))
-                    .resolution("1080x1920")
+                    .resolution(renderDims.resolution)
                     .renderVersion(1)
                     .status(JobStatus.COMPLETED)
                     .build());
@@ -788,11 +792,14 @@ public class ContentPostService {
                 .map(r -> (r.getRenderVersion() != null ? r.getRenderVersion() + 1 : 2))
                 .orElse(1);
 
+        String regenRatio = extractString(settingsService.getAllSettings().getOrDefault("videoAspectRatio", "9:16"));
+        AiProviderService.VideoDimensions regenDims = AiProviderService.VideoDimensions.fromAspectRatio(regenRatio);
+
         renderRepository.save(VideoRenderEntity.builder()
                 .postId(postId)
                 .storageUrl(renderAsset.getStorageUrl())
                 .durationSeconds((double) (post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45))
-                .resolution("1080x1920")
+                .resolution(regenDims.resolution)
                 .renderVersion(nextVersion)
                 .status(JobStatus.COMPLETED)
                 .build());
@@ -816,7 +823,9 @@ public class ContentPostService {
 
         syncSceneTimings(postId);
         List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
-        log.info("Remerging final 9:16 Reel for post {} from existing avatar and {} scenes...", postId, scenes.size());
+        String remergeRatio = extractString(settingsService.getAllSettings().getOrDefault("videoAspectRatio", "9:16"));
+        AiProviderService.VideoDimensions remergeDims = AiProviderService.VideoDimensions.fromAspectRatio(remergeRatio);
+        log.info("Remerging final {} ({}) Reel for post {} from existing avatar and {} scenes...", remergeRatio, remergeDims.resolution, postId, scenes.size());
 
         GeneratedAssetEntity renderAsset = aiProviderService.compositeVideo(
                 postId,
@@ -835,7 +844,7 @@ public class ContentPostService {
                 .postId(postId)
                 .storageUrl(renderAsset.getStorageUrl())
                 .durationSeconds((double) (post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45))
-                .resolution("1080x1920")
+                .resolution(remergeDims.resolution)
                 .renderVersion(nextVersion)
                 .status(JobStatus.COMPLETED)
                 .build());
