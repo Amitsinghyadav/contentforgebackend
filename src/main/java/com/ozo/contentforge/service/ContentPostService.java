@@ -814,6 +814,7 @@ public class ContentPostService {
             throw new IllegalStateException("Cannot remerge video: No avatar video has been generated yet for post " + postId);
         }
 
+        syncSceneTimings(postId);
         List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
         log.info("Remerging final 9:16 Reel for post {} from existing avatar and {} scenes...", postId, scenes.size());
 
@@ -852,15 +853,11 @@ public class ContentPostService {
         try {
             String ffmpeg = aiProviderService.findFfmpegBinary();
             if (ffmpeg == null) return 0;
-            Path temp = Files.createTempFile("probe_", ".tmp");
+            String lower = mediaUrl.toLowerCase();
+            String ext = (lower.contains(".mp3") || lower.contains("voice") || lower.contains("audio")) ? ".mp3" : ".mp4";
+            Path temp = Files.createTempFile("probe_", ext);
             try {
-                String s3Key = storageService.extractS3Key(mediaUrl);
-                if (s3Key != null && !s3Key.startsWith("http")) {
-                    byte[] bytes = storageService.getS3Object(s3Key);
-                    if (bytes != null && bytes.length > 0) {
-                        Files.write(temp, bytes);
-                    }
-                }
+                aiProviderService.downloadFile(mediaUrl, temp);
                 if (!Files.exists(temp) || Files.size(temp) == 0) {
                     return 0;
                 }
@@ -887,8 +884,10 @@ public class ContentPostService {
     }
 
     /**
-     * Synchronize scene start times and durations accurately based on spoken text word count
-     * and actual audio duration.
+     * Synchronize scene start times and durations accurately based on spoken text word count,
+     * configured B-roll clip durations, and actual audio duration.
+     * Ensures B-rolls are placed comfortably in the middle portions of the Reel and
+     * NEVER cut off or pushed to the end, leaving ample room for conclusion and CTA.
      */
     @Transactional
     public List<ContentSceneEntity> syncSceneTimings(Long postId) {
@@ -905,39 +904,112 @@ public class ContentPostService {
         double probedDuration = probeMediaDuration(post.getVoiceAudioUrl());
         if (probedDuration > 0) {
             totalSeconds = probedDuration;
+            if (post.getTargetDurationSeconds() == null || Math.abs(post.getTargetDurationSeconds() - probedDuration) > 1.0) {
+                post.setTargetDurationSeconds((int) Math.round(probedDuration));
+                postRepository.save(post);
+            }
         }
 
-        int totalWords = 0;
-        int[] wordCounts = new int[scenes.size()];
-        for (int i = 0; i < scenes.size(); i++) {
-            String text = scenes.get(i).getSpokenText();
-            int wc = (text != null && !text.isBlank()) ? text.trim().split("\\s+").length : 0;
-            wordCounts[i] = wc;
-            totalWords += wc;
-        }
+        Map<String, Object> settings = settingsService.getAllSettings();
+        int configuredBrollDuration = extractInt(settings.get("brollClipDuration"), 5);
+        if (configuredBrollDuration <= 0) configuredBrollDuration = 5;
 
-        int runningStart = 0;
-        for (int i = 0; i < scenes.size(); i++) {
-            ContentSceneEntity sc = scenes.get(i);
-            int dur;
-            if (totalWords > 0 && wordCounts[i] > 0) {
-                dur = (int) Math.round(((double) wordCounts[i] / totalWords) * totalSeconds);
+        List<ContentSceneEntity> brollScenes = scenes.stream()
+                .filter(s -> s.getSceneType() == SceneType.BROLL)
+                .toList();
+        List<ContentSceneEntity> avatarScenes = scenes.stream()
+                .filter(s -> s.getSceneType() != SceneType.BROLL)
+                .toList();
+
+        if (brollScenes.isEmpty() || avatarScenes.isEmpty()) {
+            int totalWords = 0;
+            int[] wordCounts = new int[scenes.size()];
+            for (int i = 0; i < scenes.size(); i++) {
+                String text = scenes.get(i).getSpokenText();
+                int wc = (text != null && !text.isBlank()) ? text.trim().split("\\s+").length : 0;
+                wordCounts[i] = wc;
+                totalWords += wc;
+            }
+
+            int runningStart = 0;
+            for (int i = 0; i < scenes.size(); i++) {
+                ContentSceneEntity sc = scenes.get(i);
+                int dur = (totalWords > 0 && wordCounts[i] > 0)
+                        ? (int) Math.round(((double) wordCounts[i] / totalWords) * totalSeconds)
+                        : (int) Math.round(totalSeconds / scenes.size());
                 if (dur < 3) dur = 3;
-            } else {
-                dur = sc.getDurationSeconds() != null ? sc.getDurationSeconds() : 5;
+                if (i == scenes.size() - 1) {
+                    dur = Math.max(3, (int) Math.round(totalSeconds - runningStart));
+                }
+                sc.setStartTimeSeconds(runningStart);
+                sc.setDurationSeconds(dur);
+                sceneRepository.save(sc);
+                runningStart += dur;
+            }
+        } else {
+            // Intelligent B-roll and Avatar timing:
+            // 1. Lock B-roll clip duration to configured brollClipDuration (capped so total B-rolls <= 40% of video)
+            int brollDur = configuredBrollDuration;
+            int maxTotalBroll = (int) Math.round(totalSeconds * 0.40);
+            if (brollScenes.size() * brollDur > maxTotalBroll && maxTotalBroll >= brollScenes.size() * 3) {
+                brollDur = Math.max(3, maxTotalBroll / brollScenes.size());
+            }
+            for (ContentSceneEntity b : brollScenes) {
+                b.setDurationSeconds(brollDur);
             }
 
-            if (i == scenes.size() - 1 && totalSeconds > runningStart) {
-                dur = Math.max(dur, (int) Math.round(totalSeconds - runningStart));
+            // 2. Allocate remaining time across Avatar scenes based on their spoken word counts
+            int totalBrollSeconds = brollScenes.size() * brollDur;
+            double remainingAvatarSeconds = Math.max(avatarScenes.size() * 3.0, totalSeconds - totalBrollSeconds);
+
+            int totalAvatarWords = 0;
+            int[] avatarWordCounts = new int[avatarScenes.size()];
+            for (int i = 0; i < avatarScenes.size(); i++) {
+                String text = avatarScenes.get(i).getSpokenText();
+                int wc = (text != null && !text.isBlank()) ? text.trim().split("\\s+").length : 0;
+                avatarWordCounts[i] = wc;
+                totalAvatarWords += wc;
             }
 
-            sc.setStartTimeSeconds(runningStart);
-            sc.setDurationSeconds(dur);
-            sceneRepository.save(sc);
-            runningStart += dur;
+            for (int i = 0; i < avatarScenes.size(); i++) {
+                ContentSceneEntity av = avatarScenes.get(i);
+                int dur = (totalAvatarWords > 0 && avatarWordCounts[i] > 0)
+                        ? (int) Math.round(((double) avatarWordCounts[i] / totalAvatarWords) * remainingAvatarSeconds)
+                        : (int) Math.round(remainingAvatarSeconds / avatarScenes.size());
+                if (dur < 3) dur = 3;
+                av.setDurationSeconds(dur);
+            }
+
+            // 3. Assign sequential start times
+            int runningStart = 0;
+            for (int i = 0; i < scenes.size(); i++) {
+                ContentSceneEntity sc = scenes.get(i);
+                sc.setStartTimeSeconds(runningStart);
+                runningStart += sc.getDurationSeconds();
+            }
+
+            // 4. Ensure last scene absorbs rounding discrepancy so total duration matches totalSeconds
+            ContentSceneEntity lastScene = scenes.get(scenes.size() - 1);
+            int finalAdjustment = Math.max(3, (int) Math.round(totalSeconds) - lastScene.getStartTimeSeconds());
+            lastScene.setDurationSeconds(finalAdjustment);
+
+            // 5. Strict safety check: ensure NO B-roll finishes within 6 seconds of video end
+            int safeEndThreshold = (int) Math.round(totalSeconds) - 6;
+            for (ContentSceneEntity sc : scenes) {
+                if (sc.getSceneType() == SceneType.BROLL) {
+                    int brollEnd = sc.getStartTimeSeconds() + sc.getDurationSeconds();
+                    if (brollEnd > safeEndThreshold) {
+                        int excess = brollEnd - safeEndThreshold;
+                        int newStart = Math.max(4, sc.getStartTimeSeconds() - excess);
+                        sc.setStartTimeSeconds(newStart);
+                    }
+                }
+                sceneRepository.save(sc);
+            }
         }
 
-        log.info("Synchronized scene timings for post {}: total duration {}s across {} scenes.", postId, totalSeconds, scenes.size());
+        log.info("Synchronized scene timings for post {}: total duration {}s across {} scenes ({} avatar, {} b-roll).",
+                postId, totalSeconds, scenes.size(), avatarScenes.size(), brollScenes.size());
         return scenes;
     }
 

@@ -284,8 +284,11 @@ public class AiProviderService {
         // Total scenes = content avatar scenes + broll scenes + (1 dedicated CTA scene if enabled)
         int totalScenes = contentAvatarCount + targetBrollCount + (attachEndCta ? 1 : 0);
 
-        // Word budget strictly computed at ~2.1 words per second (natural human speech rate with pauses)
-        int maxSpokenWords = Math.max(20, (int) Math.round(targetReelDuration * 2.1));
+        // Word budget strictly computed to guarantee audio duration matches targetReelDuration
+        // Natural human speech rate in conversational Hinglish is ~2.2 words per second
+        int minSpokenWords = Math.max(15, (int) Math.round(targetReelDuration * 2.1));
+        int targetSpokenWords = Math.max(18, (int) Math.round(targetReelDuration * 2.25));
+        int maxSpokenWords = Math.max(22, (int) Math.round(targetReelDuration * 2.4));
 
         // Build dynamic scene breakdown and word budget per scene
         StringBuilder timelineBuilder = new StringBuilder();
@@ -302,7 +305,9 @@ public class AiProviderService {
             } else if (s == scenesBeforeCta) {
                 sceneDur = Math.max(3, contentDuration - runningTimelineStart);
             }
-            int sceneWordBudget = Math.max(4, (int) Math.round(sceneDur * 2.1));
+            int sceneMinWords = Math.max(4, (int) Math.round(sceneDur * 2.0));
+            int sceneTargetWords = Math.max(5, (int) Math.round(sceneDur * 2.25));
+            int sceneMaxWords = Math.max(6, (int) Math.round(sceneDur * 2.45));
             String sceneType = isBrollScene ? "BROLL" : "AVATAR";
             String sceneDesc;
             if (s == 1) {
@@ -313,16 +318,18 @@ public class AiProviderService {
                 sceneDesc = "Core Insight / Solution #" + (curAvatarNum++);
             }
 
-            timelineBuilder.append(String.format("   - Scene %d: %s (%s, duration: exactly %d seconds, max ~%d spoken words)\n",
-                    s, sceneType, sceneDesc, sceneDur, sceneWordBudget));
+            timelineBuilder.append(String.format("   - Scene %d: %s (%s, duration: exactly %d seconds, word budget: %d-%d words, target: ~%d spoken words)\n",
+                    s, sceneType, sceneDesc, sceneDur, sceneMinWords, sceneMaxWords, sceneTargetWords));
             runningTimelineStart += sceneDur;
         }
 
         if (attachEndCta) {
             int finalCtaDur = Math.max(3, targetReelDuration - runningTimelineStart);
-            int ctaWordBudget = Math.max(4, (int) Math.round(finalCtaDur * 2.1));
-            timelineBuilder.append(String.format("   - Scene %d: AVATAR (DEDICATED BRAND CALL-TO-ACTION (CTA) END SCENE, duration: exactly %d seconds, max ~%d spoken words - Presenter explicitly speaks CTA: \"%s\")\n",
-                    totalScenes, finalCtaDur, ctaWordBudget, effectiveCtaText));
+            int ctaMinWords = Math.max(4, (int) Math.round(finalCtaDur * 2.0));
+            int ctaTargetWords = Math.max(5, (int) Math.round(finalCtaDur * 2.25));
+            int ctaMaxWords = Math.max(6, (int) Math.round(finalCtaDur * 2.45));
+            timelineBuilder.append(String.format("   - Scene %d: AVATAR (DEDICATED BRAND CALL-TO-ACTION (CTA) END SCENE, duration: exactly %d seconds, word budget: %d-%d words, target: ~%d spoken words - Presenter explicitly speaks CTA: \"%s\")\n",
+                    totalScenes, finalCtaDur, ctaMinWords, ctaMaxWords, ctaTargetWords, effectiveCtaText));
         }
         String timelineStructure = timelineBuilder.toString();
 
@@ -370,11 +377,12 @@ public class AiProviderService {
 
             SCENE COMPOSITION RULES FOR REELS (If Content Type is REEL):
             1. Total Reel duration MUST be exactly %d seconds.
-            2. CRITICAL SPOKEN WORD BUDGET (STRICT TIMING CONSTRAINT):
-               - Total spoken words across all scenes combined MUST NOT EXCEED %d words in total!
-               - Speech speed is ~2.1 words/sec. Writing more than %d words WILL CAUSE the audio track to exceed %d seconds.
-               - Every scene's "spokenText" MUST be exactly 1 concise, punchy sentence strictly respecting its scene word limit.
-               - Do NOT write conversational filler phrases or lengthy introductions.
+            2. CRITICAL SPOKEN WORD BUDGET & AUDIO DURATION (MANDATORY TIMING REQUIREMENT):
+               - TARGET DURATION: Exactly %d seconds. Spoken audio duration in ElevenLabs is directly determined by total spoken words (~2.2 words per second).
+               - TOTAL SPOKEN WORDS across all scenes combined MUST BE STRICTLY BETWEEN %d AND %d WORDS (TARGET: ~%d WORDS)!
+               - STRICT ENFORCEMENT: DO NOT WRITE FEWER THAN %d WORDS! Writing fewer than %d words WILL CAUSE the audio and video to end prematurely in half the target time (e.g. 23 seconds instead of %d seconds).
+               - DO NOT write only 1 short sentence per scene. Each scene's "spokenText" MUST contain substantial, engaging, conversational sentences that reach that scene's designated word budget.
+               - Distribute the words across all scenes according to the timeline below.
             3. The reel must contain exactly %d scenes matching this timeline structure:
 %s
             4. REEL CALL-TO-ACTION (CTA) RULES:
@@ -387,7 +395,7 @@ public class AiProviderService {
                - For B-roll scenes, "spokenText" is the voiceover narration spoken while that B-roll is visible.
                - Language: Natural Indian Hinglish (conversational Hindi with natural English terminology).
                - When all "spokenText" fields from Scene 1 to Scene %d are read sequentially, they form one seamless, continuous narration track for the entire %d-second video.
-               - Combined word count across all scenes MUST NOT exceed %d words!
+               - Combined word count across all scenes MUST BE BETWEEN %d AND %d WORDS (aiming for %d words)! Never write fewer than %d words.
 
             CAROUSEL COMPOSITION RULES (If Content Type is CAROUSEL):
             1. Generate exactly %d slides in the "slides" array.
@@ -431,11 +439,12 @@ public class AiProviderService {
             """,
             effectiveIndustry, effectiveAudience, effectiveTone, contentType, mode, targetReelDuration, topic,
             targetReelDuration,
-            maxSpokenWords, maxSpokenWords, targetReelDuration,
+            targetReelDuration, minSpokenWords, maxSpokenWords, targetSpokenWords, minSpokenWords, minSpokenWords, targetReelDuration,
             totalScenes,
             timelineStructure,
             ctaReelRules,
-            totalScenes, targetReelDuration, maxSpokenWords,
+            totalScenes, targetReelDuration,
+            minSpokenWords, maxSpokenWords, targetSpokenWords, minSpokenWords,
             targetSlideCount,
             ctaCarouselRules,
             contentType, targetReelDuration, topic, topic, topic, effectiveIndustry, effectiveCtaText,
@@ -2338,7 +2347,7 @@ public class AiProviderService {
         return String.format(Locale.US, "%d:%02d:%02d.%02d", h, m, s, cs);
     }
 
-    private void downloadFile(String url, Path destination) throws IOException {
+    public void downloadFile(String url, Path destination) throws IOException {
         String s3Key = storageService.extractS3Key(url);
         if (s3Key != null && !s3Key.startsWith("http")) {
             try {
