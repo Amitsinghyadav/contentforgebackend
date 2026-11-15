@@ -671,7 +671,8 @@ public class ContentPostService {
 
             // 3. Composition
             GeneratedAssetEntity renderAsset = aiProviderService.compositeVideo(
-                    postId, post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45, post.getTopic(), post.getAvatarVideoUrl(), scenes
+                    postId, post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45,
+                    post.getTopic(), post.getAvatarVideoUrl(), scenes, post.getPresenterScript()
             );
 
             // Record Video Render
@@ -776,7 +777,9 @@ public class ContentPostService {
 
         // Trigger FFmpeg recomposition to stitch the newly regenerated clip into the final Reel
         GeneratedAssetEntity renderAsset = aiProviderService.compositeVideo(
-                postId, post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45, post.getTopic(), post.getAvatarVideoUrl(), sceneRepository.findByPostIdOrderBySceneNumberAsc(postId)
+                postId, post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45,
+                post.getTopic(), post.getAvatarVideoUrl(),
+                sceneRepository.findByPostIdOrderBySceneNumberAsc(postId), post.getPresenterScript()
         );
         post.setFinalRenderUrl(renderAsset.getStorageUrl());
         post.setThumbnailUrl(renderAsset.getStorageUrl());
@@ -819,7 +822,8 @@ public class ContentPostService {
                 post.getTargetDurationSeconds() != null ? post.getTargetDurationSeconds() : 45,
                 post.getTopic(),
                 post.getAvatarVideoUrl(),
-                scenes
+                scenes,
+                post.getPresenterScript()
         );
 
         int nextVersion = renderRepository.findFirstByPostIdOrderByRenderVersionDesc(postId)

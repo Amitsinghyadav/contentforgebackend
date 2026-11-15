@@ -110,6 +110,7 @@ public class MasterSettingsService {
         s.put("brollClipDuration", 5);
         s.put("brollOutputRatio", "9:16");
         s.put("subtitlesEnabled", true);
+        s.put("captionLanguage", "Hinglish"); // "Hinglish", "Hindi", or "English"
 
         // Voice Cloning & Audio (ElevenLabs PVC)
         s.put("defaultVoiceTier", "INSTANT"); // "INSTANT" (IVC) or "PROFESSIONAL" (PVC)

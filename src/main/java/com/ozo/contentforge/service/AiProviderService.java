@@ -25,6 +25,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -1723,25 +1724,49 @@ public class AiProviderService {
         return e.getMessage() != null ? e.getMessage() : "Unknown Runway connection error";
     }
 
+    private record CaptionCue(double startSec, double endSec, String text) {}
+
     // =========================================================================
     // 5. FFMPEG COMPOSITION (Joining Avatar, B-Roll, Subtitles, Audio)
     // =========================================================================
     public GeneratedAssetEntity compositeVideo(Long postId, int totalDurationSeconds, String topic, String avatarVideoUrl) throws Exception {
-        return compositeVideo(postId, totalDurationSeconds, topic, avatarVideoUrl, null);
+        return compositeVideo(postId, totalDurationSeconds, topic, avatarVideoUrl, null, null);
     }
 
     public GeneratedAssetEntity compositeVideo(Long postId, int totalDurationSeconds, String topic,
-                                                String avatarVideoUrl, List<ContentSceneEntity> scenes) throws Exception {
+                                               String avatarVideoUrl, List<ContentSceneEntity> scenes) throws Exception {
+        return compositeVideo(postId, totalDurationSeconds, topic, avatarVideoUrl, scenes, null);
+    }
+
+    public GeneratedAssetEntity compositeVideo(Long postId, int totalDurationSeconds, String topic,
+                                               String avatarVideoUrl, List<ContentSceneEntity> scenes,
+                                               String spokenScript) throws Exception {
         log.info("Compositing final 9:16 vertical Reel for post {}...", postId);
         MediaJobEntity job = recordJob(postId, null, JobProvider.FFMPEG, "COMPOSITE_VIDEO");
 
         String brandLogoUrl = null;
+        boolean subtitlesEnabled = false;
+        String captionLanguage = "Hinglish";
         if (masterSettingsService != null) {
             try {
                 Map<String, Object> settings = masterSettingsService.getAllSettings();
                 brandLogoUrl = (String) settings.get("brandLogoUrl");
+                Object subObj = settings.get("subtitlesEnabled");
+                if (subObj instanceof Boolean b) {
+                    subtitlesEnabled = b;
+                } else if (subObj != null) {
+                    subtitlesEnabled = Boolean.parseBoolean(String.valueOf(subObj));
+                }
+                Object langObj = settings.get("captionLanguage");
+                if (langObj != null && !String.valueOf(langObj).isBlank()) {
+                    captionLanguage = String.valueOf(langObj).trim();
+                }
             } catch (Exception ignored) {}
         }
+
+        String effectiveSpokenScript = (spokenScript != null && !spokenScript.isBlank())
+                ? spokenScript.trim()
+                : buildSpokenScriptFromScenes(scenes);
 
         String finalUrl = (avatarVideoUrl != null && !avatarVideoUrl.isBlank()) ? avatarVideoUrl : "https://app.heygen.com/share/composite_" + postId;
 
@@ -1750,11 +1775,18 @@ public class AiProviderService {
                 .sorted(Comparator.comparingInt(ContentSceneEntity::getSceneNumber))
                 .toList() : List.of();
 
-        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && (!brollScenes.isEmpty() || (brandLogoUrl != null && !brandLogoUrl.isBlank()))) {
+        boolean needsComposite = !brollScenes.isEmpty()
+                || (brandLogoUrl != null && !brandLogoUrl.isBlank())
+                || subtitlesEnabled;
+
+        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && needsComposite) {
             try {
                 String ffmpegBin = findFfmpegBinary();
                 if (ffmpegBin != null) {
-                    finalUrl = executeFfmpegComposite(ffmpegBin, postId, avatarVideoUrl, brollScenes, brandLogoUrl);
+                    finalUrl = executeFfmpegComposite(
+                            ffmpegBin, postId, totalDurationSeconds, avatarVideoUrl,
+                            brollScenes, brandLogoUrl, subtitlesEnabled, captionLanguage, effectiveSpokenScript
+                    );
                 }
             } catch (Exception e) {
                 log.warn("FFmpeg multi-scene composition encountered error: {}. Gracefully using avatar video.", e.getMessage(), e);
@@ -1773,9 +1805,25 @@ public class AiProviderService {
                 .s3Key(cleanS3Key)
                 .mimeType("video/mp4")
                 .durationSeconds((double) totalDurationSeconds)
-                .metadataJson(String.format("{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d}", postId, topic, brollScenes.size() + 1))
+                .metadataJson(String.format(
+                        "{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d,\"captionsEnabled\":%s,\"captionLanguage\":\"%s\"}",
+                        postId, topic != null ? topic.replace("\"", "'") : "", brollScenes.size() + 1, subtitlesEnabled, captionLanguage))
                 .createdAt(LocalDateTime.now())
                 .build();
+    }
+
+    private String buildSpokenScriptFromScenes(List<ContentSceneEntity> scenes) {
+        if (scenes == null || scenes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        scenes.stream()
+                .sorted(Comparator.comparingInt(s -> s.getSceneNumber() != null ? s.getSceneNumber() : 0))
+                .forEach(s -> {
+                    if (s.getSpokenText() != null && !s.getSpokenText().isBlank()) {
+                        if (sb.length() > 0) sb.append(" ");
+                        sb.append(s.getSpokenText().trim());
+                    }
+                });
+        return sb.toString();
     }
 
     public String findFfmpegBinary() {
@@ -1790,8 +1838,10 @@ public class AiProviderService {
         return "ffmpeg";
     }
 
-    private String executeFfmpegComposite(String ffmpegBin, Long postId, String avatarUrl,
-                                          List<ContentSceneEntity> brolls, String brandLogoUrl) throws Exception {
+    private String executeFfmpegComposite(String ffmpegBin, Long postId, int totalDurationSeconds, String avatarUrl,
+                                          List<ContentSceneEntity> brolls, String brandLogoUrl,
+                                          boolean subtitlesEnabled, String captionLanguage,
+                                          String spokenScript) throws Exception {
         Path tempDir = Files.createTempDirectory("comp_post_" + postId + "_");
         Process proc = null;
         try {
@@ -1821,10 +1871,29 @@ public class AiProviderService {
                 }
             }
 
+            // 4. Generate ASS captions if enabled
+            boolean hasAssCaptions = false;
+            if (subtitlesEnabled) {
+                try {
+                    Path audioFile = tempDir.resolve("caption_audio.mp3");
+                    extractAudioForCaptions(ffmpegBin, avatarFile, audioFile);
+                    List<CaptionCue> cues = buildCaptionCues(postId, audioFile, totalDurationSeconds, spokenScript, captionLanguage);
+                    if (!cues.isEmpty()) {
+                        String assContent = buildAssSubtitles(cues);
+                        Path assFile = tempDir.resolve("captions.ass");
+                        Files.writeString(assFile, assContent, StandardCharsets.UTF_8);
+                        hasAssCaptions = Files.exists(assFile) && Files.size(assFile) > 0;
+                        log.info("Generated {} timed caption cues ({}) for post {}", cues.size(), captionLanguage, postId);
+                    }
+                } catch (Exception capEx) {
+                    log.warn("Caption generation skipped due to error for post {}: {}", postId, capEx.getMessage(), capEx);
+                }
+            }
+
             Path outputFile = tempDir.resolve("output_composite.mp4");
             Path logFile = tempDir.resolve("ffmpeg_composite.log");
 
-            // 4. Build FFmpeg command with cutaways and logo watermark filter
+            // 5. Build FFmpeg command with cutaways, logo watermark, and ASS captions filter
             List<String> cmd = new ArrayList<>();
             cmd.add(ffmpegBin);
             cmd.add("-y");
@@ -1865,11 +1934,18 @@ public class AiProviderService {
                 currentBase = nextOut;
             }
 
+            String preCaptionPad = currentBase;
             if (logoInputIdx != -1) {
+                preCaptionPad = "[v_logo]";
                 filter.append(String.format("[%d:v]scale=180:-1[logo_scaled];", logoInputIdx));
-                filter.append(String.format("%s[logo_scaled]overlay=main_w-overlay_w-40:50:format=auto[outv]", currentBase));
+                filter.append(String.format("%s[logo_scaled]overlay=main_w-overlay_w-40:50:format=auto%s;", currentBase, preCaptionPad));
+            }
+
+            if (hasAssCaptions) {
+                // pb.directory is tempDir, so 'ass=captions.ass' avoids Windows drive-colon escaping issues
+                filter.append(String.format("%sass=captions.ass[outv]", preCaptionPad));
             } else {
-                filter.append(String.format("%snull[outv]", currentBase));
+                filter.append(String.format("%snull[outv]", preCaptionPad));
             }
 
             cmd.add("-filter_complex");
@@ -1891,6 +1967,7 @@ public class AiProviderService {
 
             log.info("Running FFmpeg composite command for post {}: {}", postId, String.join(" ", cmd));
             ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.directory(tempDir.toFile());
             pb.redirectErrorStream(true);
             pb.redirectOutput(logFile.toFile());
             proc = pb.start();
@@ -1925,6 +2002,340 @@ public class AiProviderService {
                         .forEach(File::delete);
             } catch (Exception ignored) {}
         }
+    }
+
+    private void extractAudioForCaptions(String ffmpegBin, Path videoFile, Path audioOut) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    ffmpegBin, "-y", "-i", videoFile.toAbsolutePath().toString(),
+                    "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+                    audioOut.toAbsolutePath().toString()
+            );
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            p.waitFor(45, TimeUnit.SECONDS);
+            if (p.isAlive()) p.destroyForcibly();
+        } catch (Exception e) {
+            log.warn("Failed extracting audio for captions: {}", e.getMessage());
+        }
+    }
+
+    private List<CaptionCue> buildCaptionCues(Long postId, Path audioFile, int totalDurationSeconds,
+                                             String spokenScript, String captionLanguage) {
+        List<CaptionCue> cues = new ArrayList<>();
+
+        if (isRealKey(openAiKey) && Files.exists(audioFile)) {
+            try {
+                if (Files.size(audioFile) > 512) {
+                    cues = transcribeAudioWithWhisper(postId, audioFile, spokenScript, totalDurationSeconds);
+                }
+            } catch (Exception e) {
+                log.warn("Whisper transcription failed for post {}, falling back to script timing: {}", postId, e.getMessage());
+            }
+        }
+
+        if (cues.isEmpty() && spokenScript != null && !spokenScript.isBlank()) {
+            cues = buildEstimatedCuesFromScript(spokenScript, totalDurationSeconds);
+        }
+
+        if (!cues.isEmpty() && isRealKey(openAiKey)) {
+            cues = adaptCaptionsToLanguage(cues, captionLanguage, spokenScript);
+        }
+
+        return cues;
+    }
+
+    private List<CaptionCue> transcribeAudioWithWhisper(Long postId, Path audioFile, String promptHint,
+                                                        int fallbackDurationSec) throws Exception {
+        byte[] audioBytes = Files.readAllBytes(audioFile);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.setBearerAuth(openAiKey);
+
+        org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
+        org.springframework.core.io.ByteArrayResource fileResource = new org.springframework.core.io.ByteArrayResource(audioBytes) {
+            @Override
+            public String getFilename() {
+                return "caption_audio.mp3";
+            }
+        };
+        form.add("file", fileResource);
+        form.add("model", "whisper-1");
+        form.add("response_format", "verbose_json");
+        form.add("timestamp_granularities[]", "word");
+        form.add("timestamp_granularities[]", "segment");
+        if (promptHint != null && !promptHint.isBlank()) {
+            String trimmedPrompt = promptHint.length() > 300 ? promptHint.substring(0, 300) : promptHint;
+            form.add("prompt", trimmedPrompt);
+        }
+
+        HttpEntity<org.springframework.util.MultiValueMap<String, Object>> entity = new HttpEntity<>(form, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(openAiBaseUrl + "/audio/transcriptions", entity, String.class);
+
+        JsonNode root = objectMapper.readTree(response.getBody());
+        double audioDuration = root.has("duration") ? root.get("duration").asDouble(fallbackDurationSec) : fallbackDurationSec;
+        recordUsage(postId, "OPENAI", "whisper-1", Math.max(0.1, audioDuration / 60.0), "MINUTES", Math.max(0.001, (audioDuration / 60.0) * 0.006));
+
+        List<CaptionCue> result = new ArrayList<>();
+        JsonNode wordsNode = root.get("words");
+        if (wordsNode != null && wordsNode.isArray() && !wordsNode.isEmpty()) {
+            StringBuilder buf = new StringBuilder();
+            double cueStart = -1;
+            double cueEnd = 0;
+            int wordCount = 0;
+
+            for (int i = 0; i < wordsNode.size(); i++) {
+                JsonNode w = wordsNode.get(i);
+                String wordText = w.path("word").asText("").trim();
+                if (wordText.isEmpty()) continue;
+
+                double wStart = w.path("start").asDouble(cueEnd);
+                double wEnd = w.path("end").asDouble(wStart + 0.25);
+
+                // Break on a noticeable pause (> 0.45s) before adding the new word
+                if (wordCount > 0 && (wStart - cueEnd) > 0.45) {
+                    result.add(new CaptionCue(cueStart, Math.max(cueEnd, cueStart + 0.35), buf.toString().trim()));
+                    buf.setLength(0);
+                    wordCount = 0;
+                    cueStart = -1;
+                }
+
+                if (cueStart < 0) cueStart = wStart;
+                if (buf.length() > 0) buf.append(" ");
+                buf.append(wordText);
+                cueEnd = wEnd;
+                wordCount++;
+
+                boolean endsClause = wordText.endsWith(".") || wordText.endsWith("!") || wordText.endsWith("?")
+                        || wordText.endsWith(",") || wordText.endsWith(";") || wordText.endsWith(":") || wordText.endsWith("।");
+
+                if (wordCount >= 4 || (wordCount >= 2 && endsClause) || buf.length() >= 24) {
+                    result.add(new CaptionCue(cueStart, Math.max(cueEnd, cueStart + 0.35), buf.toString().trim()));
+                    buf.setLength(0);
+                    wordCount = 0;
+                    cueStart = -1;
+                }
+            }
+            if (wordCount > 0 && buf.length() > 0) {
+                result.add(new CaptionCue(cueStart, Math.max(cueEnd, cueStart + 0.35), buf.toString().trim()));
+            }
+            return result;
+        }
+
+        // Fallback to segment-level timestamps if words array wasn't returned
+        JsonNode segsNode = root.get("segments");
+        if (segsNode != null && segsNode.isArray()) {
+            for (JsonNode seg : segsNode) {
+                String segText = seg.path("text").asText("").trim();
+                if (segText.isEmpty()) continue;
+                double sStart = seg.path("start").asDouble(0.0);
+                double sEnd = seg.path("end").asDouble(sStart + 2.0);
+                result.addAll(splitTextIntoTimedCues(segText, sStart, sEnd));
+            }
+        }
+        return result;
+    }
+
+    private List<CaptionCue> buildEstimatedCuesFromScript(String spokenScript, int totalDurationSeconds) {
+        double safeDuration = Math.max(4.0, totalDurationSeconds - 0.5);
+        return splitTextIntoTimedCues(spokenScript, 0.2, safeDuration);
+    }
+
+    private List<CaptionCue> splitTextIntoTimedCues(String text, double startSec, double endSec) {
+        List<CaptionCue> cues = new ArrayList<>();
+        String[] words = text.trim().split("\\s+");
+        if (words.length == 0) return cues;
+
+        List<String> chunks = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int count = 0;
+        for (String w : words) {
+            if (current.length() > 0) current.append(" ");
+            current.append(w);
+            count++;
+            boolean endsClause = w.endsWith(".") || w.endsWith("!") || w.endsWith("?") || w.endsWith(",") || w.endsWith("।");
+            if (count >= 4 || (count >= 2 && endsClause) || current.length() >= 24) {
+                chunks.add(current.toString().trim());
+                current.setLength(0);
+                count = 0;
+            }
+        }
+        if (current.length() > 0) chunks.add(current.toString().trim());
+
+        int totalChars = chunks.stream().mapToInt(String::length).sum();
+        if (totalChars <= 0) totalChars = 1;
+        double span = Math.max(0.5, endSec - startSec);
+        double cursor = startSec;
+
+        for (String chunk : chunks) {
+            double chunkDur = span * ((double) chunk.length() / totalChars);
+            chunkDur = Math.max(0.4, chunkDur);
+            double cEnd = Math.min(endSec + 0.5, cursor + chunkDur);
+            cues.add(new CaptionCue(cursor, cEnd, chunk));
+            cursor = cEnd;
+        }
+        return cues;
+    }
+
+    private List<CaptionCue> adaptCaptionsToLanguage(List<CaptionCue> cues, String captionLanguage, String spokenScript) {
+        try {
+            String lang = (captionLanguage != null && !captionLanguage.isBlank()) ? captionLanguage.trim() : "Hinglish";
+            String langInstruction;
+            if (lang.equalsIgnoreCase("Hindi")) {
+                langInstruction = "Convert every cue into clear, natural Hindi written in Devanagari script (हिन्दी). Keep globally recognized abbreviations/brand names readable (or transliterated cleanly where natural), and make sure every chunk flows smoothly.";
+            } else if (lang.equalsIgnoreCase("English")) {
+                langInstruction = "Translate/refine every cue into crisp, natural English suitable for Instagram Reels captions.";
+            } else {
+                langInstruction = "Write every cue in natural Romanized Hinglish (Latin letters only, NO Devanagari characters), matching the exact spoken Hinglish words and fixing any misheard brand or medical spelling using the Reference Script.";
+            }
+
+            List<Map<String, Object>> inputCues = new ArrayList<>();
+            for (int i = 0; i < cues.size(); i++) {
+                inputCues.add(Map.of("id", i, "text", cues.get(i).text()));
+            }
+
+            String prompt = String.format("""
+                You are an expert Instagram Reels subtitle editor.
+                Target Caption Language & Script: %s
+                Rule: %s
+
+                Reference Spoken Script (use this for exact spelling of brand names, medical/technical terms, and intent):
+                %s
+
+                Timed Caption Cues JSON:
+                %s
+
+                Instructions:
+                - Return the EXACT same number of cues with matching "id" integers (0 to %d).
+                - Keep each cue concise (short 3-5 words matching its audio beat) so it stays strictly synced to audio timing.
+                - Output ONLY valid JSON in this schema:
+                {
+                  "cues": [
+                    { "id": 0, "text": "..." }
+                  ]
+                }
+                """,
+                    lang,
+                    langInstruction,
+                    (spokenScript != null && !spokenScript.isBlank()) ? spokenScript : "N/A",
+                    objectMapper.writeValueAsString(inputCues),
+                    cues.size() - 1
+            );
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(openAiKey);
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("model", openAiModel);
+            body.put("messages", List.of(
+                    Map.of("role", "system", "content", "You refine timed video subtitle cues into the exact target script/language and return valid JSON."),
+                    Map.of("role", "user", "content", prompt)
+            ));
+            body.put("response_format", Map.of("type", "json_object"));
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(openAiBaseUrl + "/chat/completions", entity, String.class);
+
+            JsonNode root = objectMapper.readTree(response.getBody());
+            String content = root.path("choices").get(0).path("message").path("content").asText();
+            JsonNode outJson = objectMapper.readTree(content);
+
+            Map<Integer, String> updatedById = new HashMap<>();
+            if (outJson.has("cues") && outJson.get("cues").isArray()) {
+                for (JsonNode c : outJson.get("cues")) {
+                    int id = c.path("id").asInt(-1);
+                    String txt = c.path("text").asText("").trim();
+                    if (id >= 0 && !txt.isEmpty()) {
+                        updatedById.put(id, txt);
+                    }
+                }
+            }
+
+            List<CaptionCue> adapted = new ArrayList<>(cues.size());
+            for (int i = 0; i < cues.size(); i++) {
+                CaptionCue orig = cues.get(i);
+                String newText = updatedById.getOrDefault(i, orig.text());
+                adapted.add(new CaptionCue(orig.startSec(), orig.endSec(), newText));
+            }
+            return adapted;
+        } catch (Exception e) {
+            log.warn("Caption language adaptation failed, keeping transcribed cues: {}", e.getMessage());
+            return cues;
+        }
+    }
+
+    private String buildAssSubtitles(List<CaptionCue> cues) {
+        StringBuilder ass = new StringBuilder();
+        ass.append("[Script Info]\n");
+        ass.append("ScriptType: v4.00+\n");
+        ass.append("PlayResX: 1080\n");
+        ass.append("PlayResY: 1920\n");
+        ass.append("WrapStyle: 0\n");
+        ass.append("ScaledBorderAndShadow: yes\n\n");
+
+        // MarginV=420 keeps captions cleanly above Instagram Reels bottom UI footer (~bottom 380px)
+        // MarginL=90, MarginR=90 avoids right-side Like/Comment/Share buttons
+        // Nirmala UI supports both Devanagari (Hindi) and Latin (English/Hinglish) cleanly
+        ass.append("[V4+ Styles]\n");
+        ass.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+        ass.append("Style: Default,Nirmala UI,62,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,1,5,2,2,90,90,420,1\n\n");
+
+        ass.append("[Events]\n");
+        ass.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+
+        double prevEnd = 0.0;
+        for (CaptionCue cue : cues) {
+            if (cue.text() == null || cue.text().isBlank()) continue;
+            double start = Math.max(prevEnd, cue.startSec());
+            double end = Math.max(start + 0.35, cue.endSec());
+            prevEnd = end;
+
+            String formattedText = wrapAssCaptionLine(cue.text())
+                    .replace("{", "(")
+                    .replace("}", ")");
+
+            ass.append(String.format(Locale.US, "Dialogue: 0,%s,%s,Default,,0,0,0,,%s\n",
+                    formatAssTimestamp(start),
+                    formatAssTimestamp(end),
+                    formattedText));
+        }
+        return ass.toString();
+    }
+
+    private String wrapAssCaptionLine(String text) {
+        String clean = text.trim().replaceAll("\\s+", " ");
+        if (clean.length() <= 24) return clean;
+
+        int mid = clean.length() / 2;
+        int bestSplit = -1;
+        int bestDist = Integer.MAX_VALUE;
+        for (int i = 0; i < clean.length(); i++) {
+            if (clean.charAt(i) == ' ') {
+                int dist = Math.abs(i - mid);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestSplit = i;
+                }
+            }
+        }
+        if (bestSplit > 0 && bestSplit < clean.length() - 1) {
+            return clean.substring(0, bestSplit).trim() + "\\N" + clean.substring(bestSplit + 1).trim();
+        }
+        return clean;
+    }
+
+    private String formatAssTimestamp(double seconds) {
+        double clamped = Math.max(0.0, seconds);
+        int totalCentis = (int) Math.round(clamped * 100.0);
+        int cs = totalCentis % 100;
+        int totalSecs = totalCentis / 100;
+        int s = totalSecs % 60;
+        int totalMins = totalSecs / 60;
+        int m = totalMins % 60;
+        int h = totalMins / 60;
+        return String.format(Locale.US, "%d:%02d:%02d.%02d", h, m, s, cs);
     }
 
     private void downloadFile(String url, Path destination) throws IOException {
