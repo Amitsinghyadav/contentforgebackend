@@ -5,7 +5,7 @@
 # AWS credentials
 .aws/
 aws-credentials.properties
-
+application.properties
 # IDE files
 .idea/
 *.iml
