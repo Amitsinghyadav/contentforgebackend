@@ -101,12 +101,14 @@ public class AiProviderService {
     private final BackgroundAssetRepository backgroundRepository;
     private final com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository;
     private final MasterSettingsService masterSettingsService;
+    private final MetaIntegrationService metaIntegrationService;
 
     public AiProviderService(ObjectMapper objectMapper, StorageService storageService,
                              MediaJobRepository mediaJobRepository, GenerationUsageRepository usageRepository,
                              BackgroundAssetRepository backgroundRepository,
                              com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository,
-                             MasterSettingsService masterSettingsService) {
+                             MasterSettingsService masterSettingsService,
+                             MetaIntegrationService metaIntegrationService) {
         this.objectMapper = objectMapper;
         this.storageService = storageService;
         this.mediaJobRepository = mediaJobRepository;
@@ -114,6 +116,7 @@ public class AiProviderService {
         this.backgroundRepository = backgroundRepository;
         this.videoAvatarRepository = videoAvatarRepository;
         this.masterSettingsService = masterSettingsService;
+        this.metaIntegrationService = metaIntegrationService;
     }
 
     private boolean isRealKey(String key) {
@@ -2472,8 +2475,38 @@ public class AiProviderService {
     }
 
     // =========================================================================
-    // 6. META INSTAGRAM GRAPH API PUBLISHING
+    // 6. META INSTAGRAM & FACEBOOK GRAPH API PUBLISHING
     // =========================================================================
+    private String getEffectiveMetaAccessToken() {
+        if (masterSettingsService != null) {
+            try {
+                Map<String, Object> s = masterSettingsService.getAllSettings();
+                String token = (String) s.get("facebookPageAccessToken");
+                if (token != null && !token.isBlank() && isRealKey(token)) {
+                    return token.trim();
+                }
+                token = (String) s.get("metaAccessToken");
+                if (token != null && !token.isBlank() && isRealKey(token)) {
+                    return token.trim();
+                }
+            } catch (Exception ignored) {}
+        }
+        return metaAccessToken;
+    }
+
+    private String getEffectiveInstagramAccountId() {
+        if (masterSettingsService != null) {
+            try {
+                Map<String, Object> s = masterSettingsService.getAllSettings();
+                String id = (String) s.get("instagramAccountId");
+                if (id != null && !id.isBlank() && isRealKey(id)) {
+                    return id.trim();
+                }
+            } catch (Exception ignored) {}
+        }
+        return metaAccountId;
+    }
+
     public Map<String, String> publishToInstagram(Long postId, String videoUrl, String caption) {
         return publishToInstagram(postId, videoUrl, null, caption);
     }
@@ -2486,11 +2519,14 @@ public class AiProviderService {
         String mediaId = "ig_media_" + System.currentTimeMillis();
         String permalink = "https://instagram.com/reel/ozo_" + postId + "_" + UUID.randomUUID().toString().substring(0, 8);
 
-        if (isRealKey(metaAccessToken) && isRealKey(metaAccountId)) {
+        String effectiveToken = getEffectiveMetaAccessToken();
+        String effectiveAccountId = getEffectiveInstagramAccountId();
+
+        if (isRealKey(effectiveToken) && isRealKey(effectiveAccountId)) {
             try {
                 // 1. Create media container with on-demand presigned video URL
                 String externalVideoUrl = storageService.getPresignedUrl(videoUrl, Duration.ofHours(24));
-                String url = String.format("https://graph.facebook.com/%s/%s/media", metaGraphVersion, metaAccountId);
+                String url = String.format("https://graph.facebook.com/%s/%s/media", metaGraphVersion, effectiveAccountId);
                 HttpHeaders headers = new HttpHeaders();
                 headers.setContentType(MediaType.APPLICATION_JSON);
 
@@ -2499,7 +2535,7 @@ public class AiProviderService {
                 body.put("video_url", externalVideoUrl);
                 body.put("caption", caption != null ? caption : "");
                 body.put("share_to_feed", true);
-                body.put("access_token", metaAccessToken);
+                body.put("access_token", effectiveToken);
 
                 if (coverImageUrl != null && !coverImageUrl.isBlank()) {
                     String externalCoverUrl = storageService.getPresignedUrl(coverImageUrl, Duration.ofHours(24));
@@ -2514,12 +2550,12 @@ public class AiProviderService {
                     log.info("Meta container created with ID: {}", containerId);
 
                     // 2. Poll container status until FINISHED
-                    boolean isReady = pollMetaContainerReady(containerId, 60);
+                    boolean isReady = pollMetaContainerReady(containerId, effectiveToken, 60);
 
                     // 3. Publish container to Instagram
                     if (isReady) {
                         String publishUrl = String.format("https://graph.facebook.com/%s/%s/media_publish?creation_id=%s&access_token=%s",
-                                metaGraphVersion, metaAccountId, containerId, metaAccessToken);
+                                metaGraphVersion, effectiveAccountId, containerId, effectiveToken);
                         ResponseEntity<String> pubResponse = restTemplate.postForEntity(publishUrl, null, String.class);
                         JsonNode pubJson = objectMapper.readTree(pubResponse.getBody());
                         if (pubJson.has("id")) {
@@ -2529,7 +2565,7 @@ public class AiProviderService {
                             // 4. Fetch live permalink
                             try {
                                 String permalinkUrl = String.format("https://graph.facebook.com/%s/%s?fields=permalink&access_token=%s",
-                                        metaGraphVersion, mediaId, metaAccessToken);
+                                        metaGraphVersion, mediaId, effectiveToken);
                                 ResponseEntity<String> permResponse = restTemplate.getForEntity(permalinkUrl, String.class);
                                 JsonNode permJson = objectMapper.readTree(permResponse.getBody());
                                 if (permJson.has("permalink")) {
@@ -2550,13 +2586,25 @@ public class AiProviderService {
         return Map.of("containerId", containerId, "mediaId", mediaId, "permalink", permalink);
     }
 
+    public Map<String, String> publishToFacebookPage(Long postId, String mediaUrl, String caption, boolean isVideo) {
+        log.info("Publishing to Facebook Page for post {} (isVideo={})...", postId, isVideo);
+        MediaJobEntity job = recordJob(postId, null, JobProvider.META, "PUBLISH_FACEBOOK_PAGE");
+        Map<String, String> result = metaIntegrationService.publishToFacebookPage(postId, mediaUrl, caption, isVideo);
+        completeJob(job, 0.0);
+        return result;
+    }
+
     private boolean pollMetaContainerReady(String containerId, int maxWaitSeconds) {
+        return pollMetaContainerReady(containerId, getEffectiveMetaAccessToken(), maxWaitSeconds);
+    }
+
+    private boolean pollMetaContainerReady(String containerId, String token, int maxWaitSeconds) {
         long startTime = System.currentTimeMillis();
         long maxWaitMillis = maxWaitSeconds * 1000L;
         while (System.currentTimeMillis() - startTime < maxWaitMillis) {
             try {
                 String statusUrl = String.format("https://graph.facebook.com/%s/%s?fields=status_code,status&access_token=%s",
-                        metaGraphVersion, containerId, metaAccessToken);
+                        metaGraphVersion, containerId, token);
                 ResponseEntity<String> response = restTemplate.getForEntity(statusUrl, String.class);
                 if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                     JsonNode root = objectMapper.readTree(response.getBody());

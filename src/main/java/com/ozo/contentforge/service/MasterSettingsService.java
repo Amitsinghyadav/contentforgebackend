@@ -23,6 +23,9 @@ public class MasterSettingsService {
     private final AuditLogRepository auditLogRepository;
     private final ObjectMapper objectMapper;
 
+    @org.springframework.beans.factory.annotation.Value("${meta.app.id:2141628373385657}")
+    private String metaAppIdProperty;
+
     public MasterSettingsService(MasterSettingsRepository settingsRepository,
                                  AuditLogRepository auditLogRepository,
                                  ObjectMapper objectMapper) {
@@ -38,6 +41,9 @@ public class MasterSettingsService {
                         Map<String, Object> merged = new HashMap<>(getDefaultSettings());
                         Map<String, Object> stored = objectMapper.readValue(entity.getSettingValueJson(), new TypeReference<Map<String, Object>>() {});
                         merged.putAll(stored);
+                        if (metaAppIdProperty != null && !metaAppIdProperty.isBlank()) {
+                            merged.put("metaAppId", metaAppIdProperty.trim());
+                        }
                         return merged;
                     } catch (Exception e) {
                         log.error("Failed to parse settings JSON: {}", e.getMessage());
@@ -126,11 +132,20 @@ public class MasterSettingsService {
         s.put("pvcMinAudioMinutes", 30);
         s.put("pvcHighFidelityMode", true);
 
-        // Publishing
+        // Publishing & Meta Cross-Posting
         s.put("timezone", "Asia/Kolkata");
         s.put("reelSlot1", "11:00 AM IST");
         s.put("reelSlot2", "7:00 PM IST");
         s.put("autoPublish", false);
+        s.put("metaConnected", false);
+        s.put("metaUserName", "");
+        s.put("facebookPageId", "");
+        s.put("facebookPageName", "");
+        s.put("facebookPageAccessToken", "");
+        s.put("instagramAccountId", "");
+        s.put("instagramUsername", "");
+        s.put("crossPostToFacebook", true);
+        s.put("metaAppId", metaAppIdProperty != null && !metaAppIdProperty.isBlank() ? metaAppIdProperty.trim() : "2141628373385657");
 
         // Approvals
         s.put("textApprovalRequired", true);

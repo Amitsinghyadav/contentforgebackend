@@ -118,6 +118,12 @@ public class ContentPostEntity {
     @Column(name = "published_permalink")
     private String publishedPermalink;
 
+    @Column(name = "facebook_post_id")
+    private String facebookPostId;
+
+    @Column(name = "facebook_permalink")
+    private String facebookPermalink;
+
     @Column(name = "scheduled_at")
     private LocalDateTime scheduledAt;
 

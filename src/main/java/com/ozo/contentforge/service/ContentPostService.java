@@ -1120,6 +1120,29 @@ public class ContentPostService {
                 .status("PUBLISHED")
                 .build());
 
+        // Cross-post to connected Facebook Page if enabled
+        try {
+            Map<String, Object> masterSettings = settingsService.getAllSettings();
+            boolean crossPostEnabled = !Boolean.FALSE.equals(masterSettings.get("crossPostToFacebook"));
+            String fbPageId = (String) masterSettings.get("facebookPageId");
+
+            if (crossPostEnabled && fbPageId != null && !fbPageId.isBlank()) {
+                boolean isVideo = post.getContentType() == null || post.getContentType() == ContentType.REEL;
+                String mediaUrl = isVideo ? post.getFinalRenderUrl() : (post.getThumbnailUrl() != null ? post.getThumbnailUrl() : post.getFinalRenderUrl());
+                Map<String, String> fbResult = aiProviderService.publishToFacebookPage(
+                        postId, mediaUrl, post.getCaption() + "\n\n" + post.getHashtags(), isVideo
+                );
+                if (fbResult != null) {
+                    post.setFacebookPostId(fbResult.get("postId"));
+                    post.setFacebookPermalink(fbResult.get("permalink"));
+                    log.info("Cross-posted to Facebook Page successfully. FB Post ID: {}, permalink: {}",
+                            fbResult.get("postId"), fbResult.get("permalink"));
+                }
+            }
+        } catch (Exception fbEx) {
+            log.warn("Facebook cross-posting error for post {}: {}", postId, fbEx.getMessage());
+        }
+
         return postRepository.save(post);
     }
 
