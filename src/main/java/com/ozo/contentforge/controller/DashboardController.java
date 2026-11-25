@@ -114,6 +114,7 @@ public class DashboardController {
             card.put("hashtags", p.getHashtags());
             card.put("thumbnailUrl", p.getThumbnailUrl());
             card.put("finalRenderUrl", p.getFinalRenderUrl());
+            card.put("enhancedRenderUrl", p.getEnhancedRenderUrl());
             card.put("voiceAudioUrl", p.getVoiceAudioUrl());
             card.put("scheduledAt", p.getScheduledAt());
             card.put("publishedAt", p.getPublishedAt());

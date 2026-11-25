@@ -106,6 +106,9 @@ public class ContentPostEntity {
     @Column(name = "final_render_url")
     private String finalRenderUrl;
 
+    @Column(name = "enhanced_render_url", columnDefinition = "TEXT")
+    private String enhancedRenderUrl;
+
     @Column(name = "thumbnail_url")
     private String thumbnailUrl;
 

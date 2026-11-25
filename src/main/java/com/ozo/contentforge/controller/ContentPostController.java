@@ -59,6 +59,7 @@ public class ContentPostController {
         pipeline.put("slides", postService.getSlidesForPost(id));
         pipeline.put("mediaJobs", postService.getMediaJobsForPost(id));
         pipeline.put("finalRenderUrl", post.getFinalRenderUrl());
+        pipeline.put("enhancedRenderUrl", post.getEnhancedRenderUrl());
         pipeline.put("voiceAudioUrl", post.getVoiceAudioUrl());
         pipeline.put("scheduledAt", post.getScheduledAt());
         pipeline.put("publishedAt", post.getPublishedAt());

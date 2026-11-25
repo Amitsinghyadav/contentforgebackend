@@ -74,11 +74,6 @@ public class ReelEnhanceService {
         if (ENHANCING.equals(post.getRenderStatus())) throw new IllegalStateException("This reel is already being enhanced");
         post.setRenderStatus(ENHANCING);
         post.setRenderNote(null);
-        if (status == PostStatus.FINAL_APPROVED || status == PostStatus.SCHEDULED) {
-            // the approved video is about to change: it needs approving again (the scheduled time is kept)
-            post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
-            post.setRenderNote(REAPPROVE_NOTE);
-        }
         return postRepository.save(post);
     }
 
@@ -151,21 +146,8 @@ public class ReelEnhanceService {
                 .build());
 
         fresh.setRenderStatus(ENHANCED);
-        if (fresh.getStatus() == PostStatus.PENDING_FINAL_APPROVAL) {
-            fresh.setFinalRenderUrl(result.url());
-            fresh.setThumbnailUrl(result.url());
-            fresh.setRenderEngine("remotion");
-            fresh.setRenderNote(REAPPROVE_NOTE.equals(fresh.getRenderNote()) ? "Enhanced. It was approved before: approve it again to schedule it." : null);
-        } else if (fresh.getStatus() == PostStatus.PUBLISHED) {
-            // the Instagram post stays as it is; the enhanced video becomes this reel's video (the old one is a version)
-            fresh.setFinalRenderUrl(result.url());
-            fresh.setThumbnailUrl(result.url());
-            fresh.setRenderEngine("remotion");
-            fresh.setRenderNote("Enhanced after publishing. The post on Instagram is unchanged: use Repost to post the enhanced version.");
-        } else {
-            fresh.setRenderNote("The reel was " + fresh.getStatus().name().toLowerCase().replace('_', ' ')
-                    + " before the enhanced version finished, so it kept its video. The enhanced one is saved as render v" + version + ".");
-        }
+        fresh.setEnhancedRenderUrl(result.url());
+        fresh.setRenderNote(null);
         postRepository.save(fresh);
         log.info("Reel {} enhanced (render v{})", postId, version);
     }

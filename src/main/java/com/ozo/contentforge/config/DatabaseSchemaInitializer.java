@@ -69,6 +69,7 @@ public class DatabaseSchemaInitializer {
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_note TEXT",
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_job_id VARCHAR(64)",
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS enhance_requested BOOLEAN",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS enhanced_render_url TEXT",
                 // Hibernate's enum check constraint would refuse the new RENDER_SERVICE provider on existing databases
                 "ALTER TABLE media_jobs DROP CONSTRAINT IF EXISTS media_jobs_provider_check"
         };
