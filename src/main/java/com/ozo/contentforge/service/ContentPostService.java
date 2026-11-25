@@ -86,6 +86,10 @@ public class ContentPostService {
         return postRepository.findById(id);
     }
 
+    public Optional<ContentPostEntity> getPostByEventId(Long eventId) {
+        return postRepository.findFirstByEventIdOrderByIdDesc(eventId);
+    }
+
     public List<ContentSceneEntity> getScenesForPost(Long postId) {
         return sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
     }

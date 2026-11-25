@@ -15,6 +15,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,7 +54,7 @@ public class CalendarEventController {
     }
 
     @PostMapping
-    public ResponseEntity<ContentCalendarEventEntity> createEvent(@RequestBody Map<String, Object> req) {
+    public ResponseEntity<?> createEvent(@RequestBody Map<String, Object> req) {
         String title = (String) req.get("title");
         if (title == null || title.isBlank()) {
             Map<String, Object> allSettings = settingsService.getAllSettings();
@@ -62,6 +64,13 @@ public class CalendarEventController {
         }
         LocalDate eventDate = LocalDate.parse((String) req.get("eventDate"));
         RecurrenceRule recurrence = req.containsKey("recurrenceRule") ? RecurrenceRule.valueOf((String) req.get("recurrenceRule")) : RecurrenceRule.NONE;
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        if (recurrence == RecurrenceRule.NONE && eventDate.isBefore(today)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Cannot schedule content for a past date"
+            ));
+        }
+
         String themeBrief = (String) req.get("themeBrief");
         Integer extraCount = req.containsKey("extraContentCount") ? ((Number) req.get("extraContentCount")).intValue() : 1;
         ContentType contentType = req.containsKey("contentType") ? ContentType.valueOf((String) req.get("contentType")) : ContentType.REEL;
@@ -101,15 +110,53 @@ public class CalendarEventController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> deleteEvent(@PathVariable("id") Long id) {
+    public ResponseEntity<?> deleteEvent(@PathVariable("id") Long id) {
         Optional<ContentCalendarEventEntity> eventOpt = calendarService.getEventById(id);
         if (eventOpt.isPresent()) {
             ContentCalendarEventEntity event = eventOpt.get();
+            LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+            if (event.getEventDate() != null && event.getEventDate().isBefore(today)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "Cannot delete past scheduled events because slots cannot be freed for past dates"
+                ));
+            }
             String cType = event.getContentType() != null ? event.getContentType().name() : "REEL";
             planService.releaseQuota(null, cType);
             calendarService.deleteEvent(id);
         }
         return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/{id}/post")
+    public ResponseEntity<Map<String, Object>> getPostForEvent(@PathVariable("id") Long id) {
+        ContentCalendarEventEntity event = calendarService.getEventById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Event not found: " + id));
+
+        Optional<ContentPostEntity> postOpt = postService.getPostByEventId(id);
+        if (postOpt.isEmpty() && event.getEventDate() != null) {
+            List<ContentPostEntity> datePosts = postService.getPostsForDate(event.getEventDate());
+            postOpt = datePosts.stream()
+                    .filter(p -> p.getContentType() == event.getContentType())
+                    .findFirst();
+            if (postOpt.isEmpty() && !datePosts.isEmpty()) {
+                postOpt = Optional.of(datePosts.get(0));
+            }
+        }
+
+        Map<String, Object> res = new HashMap<>();
+        res.put("event", event);
+        if (postOpt.isPresent()) {
+            ContentPostEntity post = postOpt.get();
+            res.put("hasPost", true);
+            res.put("post", post);
+            res.put("scenes", postService.getScenesForPost(post.getId()));
+            res.put("slides", postService.getSlidesForPost(post.getId()));
+            res.put("mediaJobs", postService.getMediaJobsForPost(post.getId()));
+            res.put("approvals", postService.getApprovalsForPost(post.getId()));
+        } else {
+            res.put("hasPost", false);
+        }
+        return ResponseEntity.ok(res);
     }
 
     @PostMapping("/{id}/generate")

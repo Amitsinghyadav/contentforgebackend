@@ -19,6 +19,8 @@ public interface ContentPostRepository extends JpaRepository<ContentPostEntity, 
     Optional<ContentPostEntity> findByIdempotencyKey(String idempotencyKey);
     List<ContentPostEntity> findByTargetDateAndContentType(LocalDate targetDate, ContentType contentType);
     List<ContentPostEntity> findByStatus(PostStatus status);
+    List<ContentPostEntity> findByEventIdOrderByIdDesc(Long eventId);
+    Optional<ContentPostEntity> findFirstByEventIdOrderByIdDesc(Long eventId);
     
     @Query("SELECT p FROM ContentPostEntity p WHERE p.targetDate BETWEEN :startDate AND :endDate ORDER BY p.targetDate ASC, p.createdAt ASC")
     List<ContentPostEntity> findByTargetDateBetween(@Param("startDate") LocalDate startDate, @Param("endDate") LocalDate endDate);

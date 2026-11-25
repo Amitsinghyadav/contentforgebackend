@@ -175,6 +175,11 @@ public class ContentPostController {
         return ResponseEntity.ok(postService.publishNow(id));
     }
 
+    @PostMapping("/{id}/repost")
+    public ResponseEntity<ContentPostEntity> repost(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(postService.publishNow(id));
+    }
+
     @PutMapping("/{id}/slides/{slideNumber}")
     public ResponseEntity<CarouselSlideEntity> updateSlide(@PathVariable("id") Long id,
                                                            @PathVariable("slideNumber") int slideNumber,
