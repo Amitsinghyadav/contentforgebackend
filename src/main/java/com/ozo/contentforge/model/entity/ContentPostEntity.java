@@ -139,6 +139,26 @@ public class ContentPostEntity {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    /** Chosen when the script is approved: true = deliver the enhanced reel, false = basic; null = the Settings default. */
+    @Column(name = "enhance_requested")
+    private Boolean enhanceRequested;
+
+    /** Which engine made the current final video: "ffmpeg" (basic) or "remotion" (enhanced by the render service). */
+    @Column(name = "render_engine", length = 30)
+    private String renderEngine;
+
+    /** Enhance status: null (never enhanced), ENHANCING, ENHANCED or ENHANCE_FAILED. */
+    @Column(name = "render_status", length = 30)
+    private String renderStatus;
+
+    /** Why the last enhance failed, or a note about it (for the dashboard). */
+    @Column(name = "render_note", columnDefinition = "TEXT")
+    private String renderNote;
+
+    /** The render service's job id of the last enhance (its page shows the AI director's frames and log). */
+    @Column(name = "render_job_id", length = 64)
+    private String renderJobId;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 

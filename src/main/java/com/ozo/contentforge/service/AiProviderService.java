@@ -102,15 +102,13 @@ public class AiProviderService {
     private final com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository;
     private final MasterSettingsService masterSettingsService;
     private final MetaIntegrationService metaIntegrationService;
-    private final RenderServiceClient renderServiceClient;
 
     public AiProviderService(ObjectMapper objectMapper, StorageService storageService,
                              MediaJobRepository mediaJobRepository, GenerationUsageRepository usageRepository,
                              BackgroundAssetRepository backgroundRepository,
                              com.ozo.contentforge.repository.VideoAvatarRepository videoAvatarRepository,
                              MasterSettingsService masterSettingsService,
-                             MetaIntegrationService metaIntegrationService,
-                             RenderServiceClient renderServiceClient) {
+                             MetaIntegrationService metaIntegrationService) {
         this.objectMapper = objectMapper;
         this.storageService = storageService;
         this.mediaJobRepository = mediaJobRepository;
@@ -119,7 +117,6 @@ public class AiProviderService {
         this.videoAvatarRepository = videoAvatarRepository;
         this.masterSettingsService = masterSettingsService;
         this.metaIntegrationService = metaIntegrationService;
-        this.renderServiceClient = renderServiceClient;
     }
 
     private boolean isRealKey(String key) {
@@ -2002,11 +1999,9 @@ CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!
         String brandLogoUrl = null;
         boolean subtitlesEnabled = false;
         String captionLanguage = "Hinglish";
-        Map<String, Object> allSettings = Map.of();
         if (masterSettingsService != null) {
             try {
                 Map<String, Object> settings = masterSettingsService.getAllSettings();
-                allSettings = settings;
                 brandLogoUrl = (String) settings.get("brandLogoUrl");
                 Object subObj = settings.get("subtitlesEnabled");
                 if (subObj instanceof Boolean b) {
@@ -2045,21 +2040,7 @@ CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!
                 || subtitlesEnabled
                 || !"9:16".equals(videoAspectRatio);
 
-        // Render service (Remotion): AI-directed motion graphics, captions and sound. Falls back to FFmpeg on any failure.
-        String renderEngine = "ffmpeg";
-        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && "9:16".equals(videoAspectRatio)
-                && renderServiceClient.isEnabled(allSettings)) {
-            Optional<String> rendered = renderServiceClient.render(
-                    postId, avatarVideoUrl, effectiveSpokenScript, brollScenes, allSettings, subtitlesEnabled);
-            if (rendered.isPresent()) {
-                finalUrl = rendered.get();
-                renderEngine = "remotion";
-            } else {
-                renderEngine = "ffmpeg-fallback";
-            }
-        }
-
-        if (!"remotion".equals(renderEngine) && avatarVideoUrl != null && !avatarVideoUrl.isBlank() && needsComposite) {
+        if (avatarVideoUrl != null && !avatarVideoUrl.isBlank() && needsComposite) {
             try {
                 String ffmpegBin = findFfmpegBinary();
                 if (ffmpegBin != null) {
@@ -2087,8 +2068,8 @@ CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!
                 .mimeType("video/mp4")
                 .durationSeconds((double) totalDurationSeconds)
                 .metadataJson(String.format(
-                        "{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d,\"captionsEnabled\":%s,\"captionLanguage\":\"%s\",\"aspectRatio\":\"%s\",\"resolution\":\"%s\",\"renderEngine\":\"%s\"}",
-                        postId, topic != null ? topic.replace("\"", "'") : "", brollScenes.size() + 1, subtitlesEnabled, captionLanguage, videoAspectRatio, dims.resolution, renderEngine))
+                        "{\"postId\":%d,\"topic\":\"%s\",\"composedScenes\":%d,\"captionsEnabled\":%s,\"captionLanguage\":\"%s\",\"aspectRatio\":\"%s\",\"resolution\":\"%s\"}",
+                        postId, topic != null ? topic.replace("\"", "'") : "", brollScenes.size() + 1, subtitlesEnabled, captionLanguage, videoAspectRatio, dims.resolution))
                 .createdAt(LocalDateTime.now())
                 .build();
     }

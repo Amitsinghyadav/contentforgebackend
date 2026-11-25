@@ -3,6 +3,7 @@ package com.ozo.contentforge.controller;
 import com.ozo.contentforge.model.entity.*;
 import com.ozo.contentforge.model.enums.*;
 import com.ozo.contentforge.service.ContentPostService;
+import com.ozo.contentforge.service.ReelEnhanceService;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -17,8 +18,10 @@ import java.util.*;
 public class ContentPostController {
 
     private final ContentPostService postService;
+    private final ReelEnhanceService enhanceService;
 
-    public ContentPostController(ContentPostService postService) {
+    public ContentPostController(ContentPostService postService, ReelEnhanceService enhanceService) {
+        this.enhanceService = enhanceService;
         this.postService = postService;
     }
 
@@ -99,6 +102,7 @@ public class ContentPostController {
         String cta = body != null && body.get("cta") != null ? body.get("cta").toString() : null;
         String hook = body != null && body.get("hook") != null ? body.get("hook").toString() : null;
         String reviewer = body != null && body.get("reviewerId") != null ? body.get("reviewerId").toString() : "admin";
+        Boolean enhance = body != null && body.get("enhance") instanceof Boolean b ? b : null;
 
         List<Map<String, Object>> slides = null;
         if (body != null && body.get("slides") instanceof List<?> list) {
@@ -112,7 +116,7 @@ public class ContentPostController {
             }
         }
 
-        return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer, hook, slides));
+        return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer, hook, slides, enhance));
     }
 
     @PostMapping("/{id}/retry-media")
@@ -131,6 +135,18 @@ public class ContentPostController {
     @PostMapping("/{id}/remerge")
     public ResponseEntity<ContentPostEntity> remergeVideo(@PathVariable("id") Long id) throws Exception {
         return ResponseEntity.ok(postService.remergeVideo(id));
+    }
+
+    /** Enhance: make the full edit of this reel with the render service, in the background (several minutes). */
+    @PostMapping("/{id}/enhance")
+    public ResponseEntity<?> enhanceVideo(@PathVariable("id") Long id) {
+        try {
+            ContentPostEntity post = enhanceService.markEnhancing(id);
+            enhanceService.enhanceAsync(id);
+            return ResponseEntity.ok(post);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
     }
 
     @PutMapping("/{id}/scenes/{sceneNumber}")

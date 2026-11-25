@@ -6,5 +6,6 @@ public enum JobProvider {
     HEYGEN,
     RUNWAY,
     FFMPEG,
-    META
+    META,
+    RENDER_SERVICE // contentforgerender: the enhanced (full edit) reel
 }

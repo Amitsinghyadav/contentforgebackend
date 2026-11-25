@@ -4,7 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ozo.contentforge.model.entity.BrandProfileEntity;
 import com.ozo.contentforge.model.entity.ContentSceneEntity;
+import com.ozo.contentforge.model.entity.MediaJobEntity;
+import com.ozo.contentforge.model.enums.JobProvider;
+import com.ozo.contentforge.model.enums.JobStatus;
 import com.ozo.contentforge.repository.BrandProfileRepository;
+import com.ozo.contentforge.repository.MediaJobRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -14,9 +18,11 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.*;
 
 /**
@@ -24,7 +30,7 @@ import java.util.*;
  * with AI-directed motion graphics, captions and sound design.
  *
  * Flow: POST /api/jobs (video URL + script + brand) -> poll GET /api/jobs/{id} -> download /jobs/{id}/final.mp4 -> S3.
- * Any failure returns empty, and the caller falls back to the FFmpeg composite.
+ * Used by ReelEnhanceService after the basic FFmpeg reel exists; a failure leaves the basic reel in place.
  */
 @Service
 public class RenderServiceClient {
@@ -51,8 +57,10 @@ public class RenderServiceClient {
     private final ObjectMapper objectMapper;
     private final StorageService storageService;
     private final BrandProfileRepository brandRepository;
+    private final MediaJobRepository mediaJobRepository;
 
-    public RenderServiceClient(ObjectMapper objectMapper, StorageService storageService, BrandProfileRepository brandRepository) {
+    public RenderServiceClient(ObjectMapper objectMapper, StorageService storageService, BrandProfileRepository brandRepository,
+                               MediaJobRepository mediaJobRepository) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout((int) Duration.ofSeconds(10).toMillis());
         factory.setReadTimeout((int) Duration.ofMinutes(5).toMillis()); // job submit downloads the video first
@@ -60,40 +68,76 @@ public class RenderServiceClient {
         this.objectMapper = objectMapper;
         this.storageService = storageService;
         this.brandRepository = brandRepository;
+        this.mediaJobRepository = mediaJobRepository;
     }
 
-    /** "remotion" when the render service should make the reel; RENDER_ENGINE in the environment wins over the setting. */
-    public boolean isEnabled(Map<String, Object> settings) {
+    /** Auto-enhance: "remotion" enhances every reel after its basic version; RENDER_ENGINE in the environment wins over the setting. */
+    public boolean isAutoEnhance(Map<String, Object> settings) {
         String engine = (engineOverride != null && !engineOverride.isBlank())
                 ? engineOverride
                 : String.valueOf(settings.getOrDefault("renderEngine", "ffmpeg"));
         return "remotion".equalsIgnoreCase(engine.trim());
     }
 
+    /** Outcome of one enhance: the S3 URL on success, otherwise a reason a person can act on. */
+    public record Result(String url, String jobId, String error) {
+        public boolean ok() {
+            return url != null;
+        }
+    }
+
     /**
-     * Renders the reel and uploads it to S3. Returns the S3 URL, or empty if anything fails (caller uses FFmpeg).
+     * Makes the enhanced reel and uploads it to S3. Logs a RENDER_SERVICE row in the post's tasks log, whose operation
+     * shows the live step (EDIT_REEL · transcribe, EDIT_REEL · edit, ...). Never throws.
      */
-    public Optional<String> render(Long postId, String avatarVideoUrl, String spokenScript,
-                                   List<ContentSceneEntity> brollScenes, Map<String, Object> settings, boolean captions) {
+    public Result render(Long postId, String avatarVideoUrl, String spokenScript,
+                         List<ContentSceneEntity> brollScenes, Map<String, Object> settings, boolean captions) {
+        MediaJobEntity job = mediaJobRepository.save(MediaJobEntity.builder()
+                .postId(postId)
+                .provider(JobProvider.RENDER_SERVICE)
+                .operation("EDIT_REEL · starting")
+                .status(JobStatus.IN_PROGRESS)
+                .startedAt(LocalDateTime.now())
+                .build());
+        String jobId = null;
         try {
-            String jobId = submit(postId, avatarVideoUrl, spokenScript, brollScenes, settings, captions);
+            jobId = submit(postId, avatarVideoUrl, spokenScript, brollScenes, settings, captions);
+            job.setProviderTaskId(jobId);
+            mediaJobRepository.save(job);
             log.info("Render service job {} started for post {}", jobId, postId);
-            if (!waitForJob(jobId, postId)) return Optional.empty();
+
+            String failure = waitForJob(jobId, postId, job);
+            if (failure != null) return fail(job, jobId, failure);
 
             byte[] video = restTemplate.exchange(baseUrl + "/jobs/" + jobId + "/final.mp4", HttpMethod.GET,
                     new HttpEntity<>(authHeaders()), byte[].class).getBody();
-            if (video == null || video.length == 0) {
-                log.warn("Render service job {} finished but returned an empty video", jobId);
-                return Optional.empty();
-            }
+            if (video == null || video.length == 0) return fail(job, jobId, "The render service finished but returned an empty video");
             String s3Key = "media/renders/" + UUID.randomUUID() + ".mp4";
             storageService.putS3Object(s3Key, video, "video/mp4");
             log.info("Render service reel for post {} uploaded to S3: {} ({} KB)", postId, s3Key, video.length / 1024);
-            return Optional.of(storageService.buildS3Url(s3Key));
+
+            job.setOperation("EDIT_REEL");
+            job.setStatus(JobStatus.COMPLETED);
+            job.setCompletedAt(LocalDateTime.now());
+            mediaJobRepository.save(job);
+            return new Result(storageService.buildS3Url(s3Key), jobId, null);
+        } catch (ResourceAccessException e) {
+            return fail(job, jobId, "The render service isn't reachable at " + baseUrl + " (start it with npm start in contentforgerender)");
         } catch (Exception e) {
-            log.warn("Render service failed for post {}: {}. Falling back to FFmpeg.", postId, e.getMessage());
-            return Optional.empty();
+            return fail(job, jobId, "Render service error: " + e.getMessage());
         }
+    }
+
+    private Result fail(MediaJobEntity job, String jobId, String reason) {
+        log.warn("Enhance failed for post {}: {}", job.getPostId(), reason);
+        job.setStatus(JobStatus.FAILED);
+        job.setCompletedAt(LocalDateTime.now());
+        try {
+            job.setErrorJson(objectMapper.writeValueAsString(Map.of("reason", reason)));
+        } catch (Exception ignored) {
+        }
+        mediaJobRepository.save(job);
+        return new Result(null, jobId, reason);
     }
 
     private String submit(Long postId, String avatarVideoUrl, String spokenScript, List<ContentSceneEntity> brollScenes,
@@ -163,34 +207,43 @@ public class RenderServiceClient {
         return body.get("id").asText();
     }
 
-    /** Polls every 15 s until the job is done, failed or the timeout passes. */
-    private boolean waitForJob(String jobId, Long postId) throws InterruptedException {
+    /** Polls every 15 s. Returns null when the job is done, otherwise why it failed. Each new step is shown in the tasks log. */
+    private String waitForJob(String jobId, Long postId, MediaJobEntity tracked) throws InterruptedException {
         long deadline = System.currentTimeMillis() + Duration.ofMinutes(timeoutMinutes).toMillis();
         String lastStep = "";
+        int unreachable = 0;
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(15_000);
             try {
                 String raw = restTemplate.exchange(baseUrl + "/api/jobs/" + jobId, HttpMethod.GET,
                         new HttpEntity<>(authHeaders()), String.class).getBody();
+                unreachable = 0;
                 JsonNode job = objectMapper.readTree(raw);
                 String status = job.path("status").asText();
-                if ("done".equals(status)) return true;
-                if ("failed".equals(status)) {
-                    log.warn("Render service job {} for post {} failed: {}", jobId, postId, job.path("error").asText());
-                    return false;
-                }
+                if ("done".equals(status)) return null;
+                if ("failed".equals(status)) return friendly(job.path("error").asText("unknown error"));
                 for (JsonNode step : job.path("steps")) {
-                    if ("running".equals(step.path("status").asText()) && !step.path("name").asText().equals(lastStep)) {
-                        lastStep = step.path("name").asText();
-                        log.info("Render service job {} for post {}: {}", jobId, postId, lastStep);
+                    String name = step.path("name").asText();
+                    if ("running".equals(step.path("status").asText()) && !name.equals(lastStep)) {
+                        lastStep = name;
+                        log.info("Render service job {} for post {}: {}", jobId, postId, name);
+                        tracked.setOperation("EDIT_REEL · " + name);
+                        mediaJobRepository.save(tracked);
                     }
                 }
             } catch (Exception e) {
                 log.warn("Could not read render service job {}: {}", jobId, e.getMessage());
+                if (++unreachable >= 8) return "Lost contact with the render service for 2 minutes (was it stopped?)";
             }
         }
-        log.warn("Render service job {} for post {} did not finish within {} min", jobId, postId, timeoutMinutes);
-        return false;
+        return "The render service didn't finish within " + timeoutMinutes + " minutes";
+    }
+
+    /** Turns the render service's error into something a reviewer can act on. */
+    private static String friendly(String error) {
+        if (error.contains("credits") || error.contains("insufficient_quota")) return "OpenAI has no credits left for the AI director (add credits, then enhance again)";
+        if (error.contains("401") && error.toLowerCase().contains("api key")) return "The render service's OpenAI key is invalid";
+        return "The render service failed: " + (error.length() > 300 ? error.substring(0, 300) + "…" : error);
     }
 
     private HttpHeaders authHeaders() {

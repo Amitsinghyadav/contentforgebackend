@@ -62,7 +62,15 @@ public class DatabaseSchemaInitializer {
                 "ALTER TABLE video_avatars ALTER COLUMN description TYPE TEXT",
                 "ALTER TABLE video_avatars ALTER COLUMN status_message TYPE TEXT",
                 "ALTER TABLE video_avatars ADD COLUMN IF NOT EXISTS consent_status VARCHAR(50)",
-                "ALTER TABLE video_avatars ADD COLUMN IF NOT EXISTS consent_url TEXT"
+                "ALTER TABLE video_avatars ADD COLUMN IF NOT EXISTS consent_url TEXT",
+                // Reel enhance (render service): which engine made the current video, and the enhance status
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_engine VARCHAR(30)",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_status VARCHAR(30)",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_note TEXT",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_job_id VARCHAR(64)",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS enhance_requested BOOLEAN",
+                // Hibernate's enum check constraint would refuse the new RENDER_SERVICE provider on existing databases
+                "ALTER TABLE media_jobs DROP CONSTRAINT IF EXISTS media_jobs_provider_check"
         };
 
         for (String sql : alterStatements) {

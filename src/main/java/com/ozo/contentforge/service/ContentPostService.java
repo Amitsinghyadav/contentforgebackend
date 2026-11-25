@@ -43,6 +43,7 @@ public class ContentPostService {
     private final AiProviderService aiProviderService;
     private final StorageService storageService;
     private final ObjectMapper objectMapper;
+    private final ReelEnhanceService enhanceService;
 
     public ContentPostService(ContentPostRepository postRepository,
                               ContentSceneRepository sceneRepository,
@@ -59,7 +60,8 @@ public class ContentPostService {
                               VoiceLibraryRepository voiceRepository,
                               AiProviderService aiProviderService,
                               StorageService storageService,
-                              ObjectMapper objectMapper) {
+                              ObjectMapper objectMapper,
+                              ReelEnhanceService enhanceService) {
         this.postRepository = postRepository;
         this.sceneRepository = sceneRepository;
         this.slideRepository = slideRepository;
@@ -76,6 +78,16 @@ public class ContentPostService {
         this.aiProviderService = aiProviderService;
         this.storageService = storageService;
         this.objectMapper = objectMapper;
+        this.enhanceService = enhanceService;
+    }
+
+    /** The current video is the basic FFmpeg one; keep a running enhance's status so its result still lands. */
+    private void markBasicVideo(ContentPostEntity post) {
+        post.setRenderEngine("ffmpeg");
+        if (!ReelEnhanceService.ENHANCING.equals(post.getRenderStatus())) {
+            post.setRenderStatus(null);
+            post.setRenderNote(null);
+        }
     }
 
     public List<ContentPostEntity> getPostsForDate(LocalDate date) {
@@ -357,8 +369,20 @@ public class ContentPostService {
     public ContentPostEntity approveText(Long postId, String updatedPresenterScript, String updatedVoiceoverScript,
                                          String updatedCaption, String updatedCta, String reviewerId,
                                          String updatedHook, List<Map<String, Object>> updatedSlides) {
+        return approveText(postId, updatedPresenterScript, updatedVoiceoverScript, updatedCaption, updatedCta, reviewerId,
+                updatedHook, updatedSlides, null);
+    }
+
+    /** @param enhance reels only: true = deliver the enhanced (full edit) reel, false = basic, null = Settings default */
+    @Transactional
+    public ContentPostEntity approveText(Long postId, String updatedPresenterScript, String updatedVoiceoverScript,
+                                         String updatedCaption, String updatedCta, String reviewerId,
+                                         String updatedHook, List<Map<String, Object>> updatedSlides, Boolean enhance) {
         ContentPostEntity post = postRepository.findById(postId)
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+        if (enhance != null && post.getContentType() == ContentType.REEL) {
+            post.setEnhanceRequested(enhance);
+        }
 
         if (updatedHook != null && !updatedHook.trim().isEmpty()) {
             post.setHook(updatedHook);
@@ -696,9 +720,20 @@ public class ContentPostService {
             post.setFinalRenderUrl(renderAsset.getStorageUrl());
             post.setThumbnailUrl(renderAsset.getStorageUrl());
             post.setActualCostUsd(totalCost + 0.10);
-            post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
-            postRepository.save(post);
-            log.info("Media pipeline completed for post {}. Ready for final approval.", postId);
+            markBasicVideo(post);
+            boolean deliverEnhanced = post.getEnhanceRequested() != null ? post.getEnhanceRequested() : enhanceService.isAutoEnhance();
+            if (deliverEnhanced) {
+                // Enhanced reel: the basic video is the backup; the reel goes to approval once the full edit is done
+                post.setRenderStatus(ReelEnhanceService.ENHANCING);
+                post.setRenderNote(null);
+                postRepository.save(post);
+                log.info("Basic video ready for post {}; making the enhanced reel before final approval...", postId);
+                enhanceService.enhance(postId);
+            } else {
+                post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
+                postRepository.save(post);
+                log.info("Media pipeline completed for post {}. Ready for final approval.", postId);
+            }
 
         } catch (Exception e) {
             log.error("Media generation failed for post {}: {}", postId, e.getMessage(), e);
@@ -808,6 +843,7 @@ public class ContentPostService {
                 .status(JobStatus.COMPLETED)
                 .build());
 
+        markBasicVideo(post);
         postRepository.save(post);
 
         return scene;
@@ -855,6 +891,7 @@ public class ContentPostService {
 
         post.setFinalRenderUrl(renderAsset.getStorageUrl());
         post.setThumbnailUrl(renderAsset.getStorageUrl());
+        markBasicVideo(post);
         return postRepository.save(post);
     }
 
