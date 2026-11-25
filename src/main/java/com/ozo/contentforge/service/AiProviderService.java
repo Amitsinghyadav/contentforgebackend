@@ -454,12 +454,48 @@ public class AiProviderService {
             5. CRITICAL RULE FOR B-ROLL VISUAL PROMPTS:
                - NEVER output generic placeholders like "capturing key concept of scene 2" or "b-roll related to topic".
                - Write a vivid, cinematic %s (%s) Runway text-to-video prompt detailing what is physically seen on camera (specific subjects, equipment, environment, lighting, camera glide, depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
-            6. CRITICAL RULE FOR SPOKEN TEXT:
+            6. CRITICAL RULE FOR SPOKEN TEXT - EMOTIONAL DELIVERY & ELEVENLABS VOICE DIRECTION:
                - Every scene (both AVATAR and BROLL) MUST have a specific "spokenText" field.
                - For B-roll scenes, "spokenText" is the voiceover narration spoken while that B-roll is visible.
                - Language: Natural Indian Hinglish (conversational Hindi with natural English terminology).
                - When all "spokenText" fields from Scene 1 to Scene %d are read sequentially, they form one seamless, continuous narration track for the entire %d-second video.
                - Combined word count across all scenes MUST BE BETWEEN %d AND %d WORDS (aiming for %d words)! Never write fewer than %d words.
+               - MANDATORY ELEVENLABS VOICE DIRECTION RULES:
+                 The spokenText will be fed directly to ElevenLabs TTS. ElevenLabs reads the text and infers
+                 emotion from inline audio tags, punctuation, word choice, rhythm, and sentence structure.
+                 You MUST write emotionally intelligent, ElevenLabs-ready scripts using these techniques:
+
+                 (a) INLINE EMOTION TAGS - place contextually, not before every sentence:
+                   [excited], [surprised], [curious], [sad], [whispers], [laughs], [sighs],
+                   [angry], [nervous], [calm], [thoughtful], [serious], [playful], [reassuring]
+
+                 (b) EMOTION-SPECIFIC PATTERNS:
+                   SURPRISE/SHOCK: [surprised] "Yaar... sach mein?! Yeh kaise possible hai?!"
+                   EXCITEMENT: [excited] "Guys! Yeh toh KAMAAL ho gaya! Seriously, unbelievable!"
+                   SAD/HEARTFELT: [sad] "Kabhi kabhi... zindagi mein kuch pal aise aate hain... jo humein andar tak chhoo jaate hain."
+                   CURIOSITY/SUSPENSE: [curious] "Lekin... kya aapne kabhi socha hai ki aisa kyun hota hai?"
+                   CONFIDENCE: "Aur isi wajah se yeh solution ITNA important hai."
+                   EMPATHY: [reassuring] "Main samajh sakta hoon... yeh situation aasaan nahi hai."
+                   URGENCY: "Ruko! Yeh galti MAT karna - ABHI dhyan do!"
+                   SUSPENSE: [curious] "Kuch toh hai... jo aap nahi jaante. Kuch jo... chhupaaya ja raha hai."
+                   HUMOUR: [playful] "Arre bhai... yeh toh ulta hi ho gaya! [laughs]"
+                   STORYTELLING: "Ek baar ki baat hai... ek aadmi roz uthta tha, thaka hua. Phir... ek din, sab kuch badal gaya."
+                   CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!"
+
+                 (c) PUNCTUATION & PACING RULES:
+                   - "..." for hesitation, anticipation, dramatic pauses
+                   - "," for natural breathing pauses
+                   - "!" for genuine excitement peaks only - not every sentence
+                   - "?" for questioning intonation
+                   - "---" for abrupt dramatic shifts
+                   - ONE word in ALL-CAPS per sentence for vocal emphasis
+                   - Short 3-5 word sentences = high energy; Long comma-separated = slow/emotional
+
+                 (d) EMOTIONAL TRANSITIONS:
+                   - Change emotions naturally as the story progresses
+                   - Use suspense before reveals, excitement during discoveries, calm during explanations
+                   - Do NOT put an emotion tag before every sentence - only at meaningful transitions
+                   - The final audio must sound like a real human speaking spontaneously, not a robot
 
             CAROUSEL COMPOSITION RULES (If Content Type is CAROUSEL):
             1. Generate exactly %d slides in the "slides" array.
@@ -485,7 +521,7 @@ public class AiProviderService {
                    "startSeconds": 0,
                    "durationSeconds": %d,
                    "aspectRatio": "%s",
-                   "spokenText": "Opening hook and problem statement in natural Hinglish...",
+                   "spokenText": "Yaar, kya aap JAANTE hain?! Ek aisi baat jo aapki zindagi badal sakti hai... [Emotionally charged Hinglish — use surprise, rhetorical questions, ALL-CAPS for emphasis, ellipsis for dramatic pauses, ! for excitement per scene emotion]",
                    "visualPrompt": "Confident presenter looking directly into the camera in a modern studio with soft warm rim lighting and shallow depth of field",
                    "cameraDirection": "Slow gentle push-in"
                  }
@@ -834,7 +870,11 @@ public class AiProviderService {
                 : "rRAzMEZ6U57ivzmuPBhL"; // Default Amit Singh Yadav cloned voice
 
         if (isRealKey(elevenLabsKey)) {
-            byte[] audioBytes = callElevenLabsTts(text, effectiveVoiceId);
+            // Apply GPT voice direction pass: transforms raw spokenText into ElevenLabs-ready
+            // emotionally tagged script with [excited], [surprised], [sad] etc. inline tags.
+            String directedText = applyVoiceDirection(text);
+            log.info("Voice direction applied. Original chars: {}, Directed chars: {}", text != null ? text.length() : 0, directedText.length());
+            byte[] audioBytes = callElevenLabsTts(directedText, effectiveVoiceId);
             if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
                 log.warn("ElevenLabs TTS failed for voice '{}'. Retrying with verified default voice 'rRAzMEZ6U57ivzmuPBhL' (Amit Singh Yadav)...", effectiveVoiceId);
                 audioBytes = callElevenLabsTts(text, "rRAzMEZ6U57ivzmuPBhL");
@@ -853,16 +893,132 @@ public class AiProviderService {
         throw new IllegalStateException("ElevenLabs TTS failed to generate valid audio for voice ID: " + voiceId);
     }
 
+    /**
+     * GPT-powered Voice Direction Pass.
+     * Transforms raw spokenText into an ElevenLabs-ready, emotionally expressive script.
+     * Adds inline emotion tags ([excited], [surprised], [sad], etc.), natural punctuation,
+     * pacing cues, and conversational rhythm so ElevenLabs renders genuine emotion.
+     * Falls back to the original text if GPT is unavailable or fails.
+     */
+    private String applyVoiceDirection(String text) {
+        if (text == null || text.isBlank()) return text;
+        if (!isRealKey(openAiKey)) {
+            log.debug("OpenAI key not configured - skipping voice direction pass, using raw text.");
+            return text;
+        }
+        try {
+            String systemPrompt = """
+You are an expert AI voice director, emotional storytelling specialist, and script optimizer for ElevenLabs Text-to-Speech.
+Your task is to transform any script into natural, emotionally expressive, human-like speech using ElevenLabs-compatible audio tags, punctuation, pacing, and conversational rhythm.
+
+CORE RULES:
+
+1. EMOTIONAL INTELLIGENCE
+- Analyze the meaning, context, and emotional intention of every sentence.
+- Automatically identify emotions: excitement, surprise, curiosity, suspense, sadness, empathy, happiness, confidence, frustration, fear, reassurance, and calmness.
+- Apply appropriate emotion tags only when they improve delivery.
+- Preserve the original meaning, language, and factual content.
+
+2. ELEVENLABS AUDIO TAGS
+Use these inline audio tags contextually - never before every sentence:
+[excited], [surprised], [curious], [sad], [whispers], [laughs], [sighs], [angry], [nervous], [calm], [thoughtful], [serious], [playful], [reassuring]
+Place tags only at meaningful emotional transitions. Some tags are voice-dependent.
+
+3. EMOTIONAL DELIVERY PATTERNS
+SURPRISE/SHOCK: [surprised] "Yaar... sach mein?! Yeh kaise possible hai?!"
+EXCITEMENT: [excited] "Guys! Yeh toh KAMAAL ho gaya! Seriously, unbelievable!"
+SAD/HEARTFELT: [sad] "Kabhi kabhi... zindagi mein kuch pal aise aate hain... jo humein andar tak chhoo jaate hain."
+CURIOSITY/SUSPENSE: [curious] "Lekin... kya aapne kabhi socha hai ki aisa kyun hota hai?"
+CONFIDENCE: "Aur isi wajah se yeh solution ITNA important hai."
+EMPATHY: [reassuring] "Main samajh sakta hoon... yeh situation aasaan nahi hai."
+URGENCY: "Ruko! Yeh galti MAT karna - ABHI dhyan do!"
+SUSPENSE: [curious] "Kuch toh hai... jo aap nahi jaante. Kuch jo... chhupaaya ja raha hai."
+HUMOUR: [playful] "Arre bhai... yeh toh ulta hi ho gaya! [laughs]"
+CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!"
+
+4. PUNCTUATION AND PACING
+- Use "..." for hesitation, anticipation, dramatic pauses.
+- Use "," for natural breathing pauses.
+- Use "!" for genuine excitement peaks only - not every sentence.
+- Use "?" for questioning intonation.
+- Use "---" for abrupt dramatic shifts.
+- Use ALL-CAPS sparingly - ONE key word per sentence for vocal emphasis.
+- Short 3-5 word sentences = high energy. Long comma-separated sentences = slow/emotional.
+
+5. HINDI/ENGLISH/HINGLISH
+- Preserve the original language and natural code-switching.
+- Maintain authentic Indian conversational rhythm.
+- Avoid robotic translations. Write natural, speakable sentences.
+
+6. EMOTIONAL TRANSITIONS
+- Change emotions naturally as the story progresses.
+- Use suspense before reveals, excitement during discoveries, calm during explanations.
+- Do NOT add emotion tags before every sentence.
+
+7. VOICE NATURALNESS
+- Final audio must sound like a real human speaking spontaneously.
+- Avoid overacting, exaggerated shouting, artificial pauses.
+- Prefer subtle, believable emotional delivery.
+- Use [laughs] or [sighs] only when contextually appropriate.
+
+8. OUTPUT RULES
+- Output ONLY the final ElevenLabs-ready script text.
+- Include emotional audio tags inline with the spoken text.
+- Do NOT include explanations, headings, timestamps, markdown, or commentary.
+- Do NOT alter essential facts, names, numbers, or intended message.
+- Do NOT include unsupported production instructions as spoken text.
+""";
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(openAiKey);
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("model", openAiModel);
+            body.put("messages", List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content",
+                    "Transform this script into an emotionally expressive ElevenLabs-ready script. " +
+                    "Output ONLY the final script text with inline emotion tags. No explanations.\\n\\nSCRIPT:\\n" + text)
+            ));
+            body.put("max_tokens", 2000);
+            body.put("temperature", 0.7);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                openAiBaseUrl + "/chat/completions", entity, String.class
+            );
+
+            JsonNode root = objectMapper.readTree(response.getBody());
+            String directed = root.path("choices").get(0).path("message").path("content").asText().trim();
+            if (directed.isBlank()) {
+                log.warn("Voice direction returned empty result - falling back to original text.");
+                return text;
+            }
+            return directed;
+        } catch (Exception e) {
+            log.warn("Voice direction GPT pass failed: {} - falling back to original text.", e.getMessage());
+            return text; // Graceful fallback - never break TTS pipeline
+        }
+    }
+
     private byte[] callElevenLabsTts(String text, String voiceId) {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.set("xi-api-key", elevenLabsKey);
             headers.setContentType(MediaType.APPLICATION_JSON);
 
+            // PVC (Professional Voice Clone) voices need slightly higher stability to stay on-voice.
+            // For standard cloned/library voices we want:
+            //   stability LOW  â†’ more natural pitch variation & emotion (not robotic)
+            //   style HIGH     â†’ style/expressiveness exaggeration (excitement, surprise, warmth)
+            //   similarity LOW-MED â†’ allows the voice to "act" rather than just mimic baseline recording
+            //   use_speaker_boost â†’ enhances clarity and presence
             boolean isPvc = (voiceId != null && (voiceId.startsWith("el_pvc_") || voiceId.contains("pvc")));
-            double stability = isPvc ? 0.50 : 0.45;
-            double similarity = isPvc ? 0.95 : 0.88;
-            double style = isPvc ? 0.15 : 0.10;
+            double stability       = isPvc ? 0.38 : 0.28;   // Lower = more dynamic, more emotion
+            double similarity      = isPvc ? 0.88 : 0.78;   // Mid = lets voice emote freely
+            double style           = isPvc ? 0.55 : 0.65;   // Higher = more expressive / style exaggeration
+            double speakerBoost    = 1.0;                    // always on
 
             Map<String, Object> body = Map.of(
                     "text", text,
@@ -977,7 +1133,7 @@ public class AiProviderService {
                         return filename != null ? filename : "studio_sample.mp3";
                     }
                 };
-                form.add("files[]", fileResource);
+                form.add("files", fileResource);
 
                 if (consentBytes != null && consentBytes.length > 0) {
                     org.springframework.core.io.ByteArrayResource consentResource = new org.springframework.core.io.ByteArrayResource(consentBytes) {
@@ -986,7 +1142,7 @@ public class AiProviderService {
                             return consentFilename != null ? consentFilename : "pvc_consent.mp3";
                         }
                     };
-                    form.add("files[]", consentResource);
+                    form.add("files", consentResource);
                 }
                 form.add("remove_background_noise", "false");
 
@@ -1510,7 +1666,7 @@ public class AiProviderService {
             String videoUrl = "https://app.heygen.com/share/" + (videoId != null ? videoId : "video_" + System.currentTimeMillis());
             String realMp4Url = null;
             if (videoId != null && !videoId.startsWith("video_")) {
-                // Poll asynchronously without artificial timeout — wait until completed or explicitly failed
+                // Poll asynchronously without artificial timeout â€” wait until completed or explicitly failed
                 realMp4Url = pollHeyGenVideoUrl(videoId);
                 if (realMp4Url != null && !realMp4Url.isBlank()) {
                     try {
@@ -1612,7 +1768,7 @@ public class AiProviderService {
                         log.error("HeyGen video {} explicitly failed on server: {}", videoId, errDetail);
                         throw new RuntimeException("HeyGen video processing failed on server: " + errDetail);
                     } else {
-                        // Actively rendering/processing/queued — wait asynchronously without timing out
+                        // Actively rendering/processing/queued â€” wait asynchronously without timing out
                         long elapsedSec = (System.currentTimeMillis() - startTime) / 1000;
                         if (elapsedSec % 20 == 0) {
                             log.info("HeyGen video {} is currently '{}' (elapsed: {}s). Waiting for completion...", videoId, status, elapsedSec);
@@ -2216,7 +2372,7 @@ public class AiProviderService {
                 wordCount++;
 
                 boolean endsClause = wordText.endsWith(".") || wordText.endsWith("!") || wordText.endsWith("?")
-                        || wordText.endsWith(",") || wordText.endsWith(";") || wordText.endsWith(":") || wordText.endsWith("।");
+                        || wordText.endsWith(",") || wordText.endsWith(";") || wordText.endsWith(":") || wordText.endsWith("à¥¤");
 
                 if (wordCount >= 4 || (wordCount >= 2 && endsClause) || buf.length() >= 24) {
                     result.add(new CaptionCue(cueStart, Math.max(cueEnd, cueStart + 0.35), buf.toString().trim()));
@@ -2262,7 +2418,7 @@ public class AiProviderService {
             if (current.length() > 0) current.append(" ");
             current.append(w);
             count++;
-            boolean endsClause = w.endsWith(".") || w.endsWith("!") || w.endsWith("?") || w.endsWith(",") || w.endsWith("।");
+            boolean endsClause = w.endsWith(".") || w.endsWith("!") || w.endsWith("?") || w.endsWith(",") || w.endsWith("à¥¤");
             if (count >= 4 || (count >= 2 && endsClause) || current.length() >= 24) {
                 chunks.add(current.toString().trim());
                 current.setLength(0);
@@ -2291,7 +2447,7 @@ public class AiProviderService {
             String lang = (captionLanguage != null && !captionLanguage.isBlank()) ? captionLanguage.trim() : "Hinglish";
             String langInstruction;
             if (lang.equalsIgnoreCase("Hindi")) {
-                langInstruction = "Convert every cue into clear, natural Hindi written in Devanagari script (हिन्दी). Keep globally recognized abbreviations/brand names readable (or transliterated cleanly where natural), and make sure every chunk flows smoothly.";
+                langInstruction = "Convert every cue into clear, natural Hindi written in Devanagari script (à¤¹à¤¿à¤¨à¥à¤¦à¥€). Keep globally recognized abbreviations/brand names readable (or transliterated cleanly where natural), and make sure every chunk flows smoothly.";
             } else if (lang.equalsIgnoreCase("English")) {
                 langInstruction = "Translate/refine every cue into crisp, natural English suitable for Instagram Reels captions.";
             } else {
@@ -2664,3 +2820,4 @@ public class AiProviderService {
                 .build());
     }
 }
+
