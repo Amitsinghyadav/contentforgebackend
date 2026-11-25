@@ -36,6 +36,9 @@ public class ReelEnhanceService {
     public static final String ENHANCED = "ENHANCED";
     public static final String ENHANCE_FAILED = "ENHANCE_FAILED";
 
+    /** Approved or scheduled reels go back to final approval while they are enhanced. */
+    static final String REAPPROVE_NOTE = "Sent back to final approval for the enhanced version: approve it again to schedule it.";
+
     private final ContentPostRepository postRepository;
     private final ContentSceneRepository sceneRepository;
     private final VideoRenderRepository renderRepository;
@@ -64,11 +67,18 @@ public class ReelEnhanceService {
         if (post.getContentType() != ContentType.REEL) throw new IllegalStateException("Only reels can be enhanced");
         if (post.getAvatarVideoUrl() == null || post.getAvatarVideoUrl().isBlank())
             throw new IllegalStateException("This reel has no avatar video yet");
-        if (post.getStatus() != PostStatus.PENDING_FINAL_APPROVAL)
-            throw new IllegalStateException("A reel can be enhanced while it waits for final approval (now " + post.getStatus() + ")");
+        PostStatus status = post.getStatus();
+        boolean allowed = status == PostStatus.PENDING_FINAL_APPROVAL || status == PostStatus.FINAL_APPROVED
+                || status == PostStatus.SCHEDULED || status == PostStatus.PUBLISHED;
+        if (!allowed) throw new IllegalStateException("This reel can't be enhanced while it is " + status.name().toLowerCase().replace('_', ' '));
         if (ENHANCING.equals(post.getRenderStatus())) throw new IllegalStateException("This reel is already being enhanced");
         post.setRenderStatus(ENHANCING);
         post.setRenderNote(null);
+        if (status == PostStatus.FINAL_APPROVED || status == PostStatus.SCHEDULED) {
+            // the approved video is about to change: it needs approving again (the scheduled time is kept)
+            post.setStatus(PostStatus.PENDING_FINAL_APPROVAL);
+            post.setRenderNote(REAPPROVE_NOTE);
+        }
         return postRepository.save(post);
     }
 
@@ -115,7 +125,7 @@ public class ReelEnhanceService {
         log.info("Enhancing reel {} with the render service ({} B-roll clips)...", postId, broll.size());
         RenderServiceClient.Result result = renderServiceClient.render(postId, post.getAvatarVideoUrl(), script, broll, settings, captions);
 
-        // reload: the reel may have been approved or edited while the render ran
+        // reload: the reel may have been approved, published or edited while the render ran
         ContentPostEntity fresh = postRepository.findById(postId).orElse(null);
         if (fresh == null) return;
         fresh.setRenderJobId(result.jobId());
@@ -145,7 +155,13 @@ public class ReelEnhanceService {
             fresh.setFinalRenderUrl(result.url());
             fresh.setThumbnailUrl(result.url());
             fresh.setRenderEngine("remotion");
-            fresh.setRenderNote(null);
+            fresh.setRenderNote(REAPPROVE_NOTE.equals(fresh.getRenderNote()) ? "Enhanced. It was approved before: approve it again to schedule it." : null);
+        } else if (fresh.getStatus() == PostStatus.PUBLISHED) {
+            // the Instagram post stays as it is; the enhanced video becomes this reel's video (the old one is a version)
+            fresh.setFinalRenderUrl(result.url());
+            fresh.setThumbnailUrl(result.url());
+            fresh.setRenderEngine("remotion");
+            fresh.setRenderNote("Enhanced after publishing. The post on Instagram is unchanged: use Repost to post the enhanced version.");
         } else {
             fresh.setRenderNote("The reel was " + fresh.getStatus().name().toLowerCase().replace('_', ' ')
                     + " before the enhanced version finished, so it kept its video. The enhanced one is saved as render v" + version + ".");
