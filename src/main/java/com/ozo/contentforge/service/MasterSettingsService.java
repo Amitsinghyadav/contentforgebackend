@@ -126,6 +126,12 @@ public class MasterSettingsService {
         s.put("subtitlesEnabled", true);
         s.put("captionLanguage", "Hinglish"); // "Hinglish", "Hindi", or "English"
         s.put("renderEngine", "ffmpeg"); // "ffmpeg" (basic composite) or "remotion" (contentforgerender service)
+        s.put("reelStyle", "clean-brand"); // render service style id
+        s.put("brandPrimaryColor", "#0074BC");
+        s.put("brandSecondaryColor", "#2BB673");
+        s.put("brandTextColor", "#231F20");
+        s.put("brandPhone", "");
+        s.put("brandInstagramHandle", ""); // empty = the connected Instagram account (instagramUsername)
 
         // Voice Cloning & Audio (ElevenLabs PVC)
         s.put("defaultVoiceTier", "INSTANT"); // "INSTANT" (IVC) or "PROFESSIONAL" (PVC)

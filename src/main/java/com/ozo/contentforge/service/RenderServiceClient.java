@@ -98,29 +98,37 @@ public class RenderServiceClient {
 
     private String submit(Long postId, String avatarVideoUrl, String spokenScript, List<ContentSceneEntity> brollScenes,
                           Map<String, Object> settings, boolean captions) throws Exception {
+        // Dashboard Settings win; the default brand profile only fills gaps
         BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
-        List<String> colors = brandColors(brand);
+        List<String> profileColors = brandColors(brand);
+        String primary = firstNonBlank(hex(settings.get("brandPrimaryColor")), profileColors.size() > 0 ? profileColors.get(0) : null);
+        String secondary = firstNonBlank(hex(settings.get("brandSecondaryColor")), profileColors.size() > 1 ? profileColors.get(1) : null);
+        String textColor = firstNonBlank(hex(settings.get("brandTextColor")), profileColors.size() > 2 ? profileColors.get(2) : null);
 
         MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
         // the render service downloads these itself, so S3 objects get a short-lived presigned link
         form.add("videoUrl", storageService.getPresignedUrl(avatarVideoUrl, Duration.ofHours(2)));
-        form.add("style", style);
+        form.add("style", firstNonBlank(str(settings.get("reelStyle")), style));
         form.add("layout", "vertical"); // HeyGen renders 9:16
         form.add("captions", String.valueOf(captions));
-        form.add("brandName", firstNonBlank(brand != null ? brand.getBrandName() : null, str(settings.get("brandName")), "My Brand"));
-        if (colors.size() > 0) form.add("primary", colors.get(0));
-        if (colors.size() > 1) form.add("secondary", colors.get(1));
-        if (colors.size() > 2) form.add("textColor", colors.get(2));
+        form.add("brandName", firstNonBlank(str(settings.get("brandName")), brand != null ? brand.getBrandName() : null, "My Brand"));
+        if (primary != null) form.add("primary", primary);
+        if (secondary != null) form.add("secondary", secondary);
+        if (textColor != null) form.add("textColor", textColor);
+        String handle = firstNonBlank(str(settings.get("brandInstagramHandle")), str(settings.get("instagramUsername")));
+        if (handle != null) form.add("handle", "@" + handle.replaceFirst("^@", ""));
 
         String logoUrl = firstNonBlank(str(settings.get("brandLogoUrl")), brand != null ? brand.getLogoUrl() : null);
         if (logoUrl != null) form.add("logoUrl", storageService.getPresignedUrl(logoUrl, Duration.ofHours(2)));
         if (spokenScript != null && !spokenScript.isBlank()) form.add("script", spokenScript);
 
         // the director treats notes as requirements: the brand's call to action and website must appear
-        String cta = firstNonBlank(brand != null ? brand.getCta() : null, str(settings.get("cta")));
-        String website = firstNonBlank(brand != null ? brand.getWebsite() : null, str(settings.get("website")));
+        String cta = firstNonBlank(str(settings.get("cta")), brand != null ? brand.getCta() : null);
+        String website = firstNonBlank(str(settings.get("website")), brand != null ? brand.getWebsite() : null);
+        String phone = firstNonBlank(str(settings.get("brandPhone")));
         StringBuilder notes = new StringBuilder();
         if (cta != null) notes.append("Call to action: ").append(cta).append(". ");
+        if (phone != null) notes.append("Phone number: ").append(phone).append(" (show it large when the speaker asks viewers to call or book). ");
         if (website != null) notes.append("Website: ").append(website).append(". ");
         if (notes.length() > 0) form.add("notes", notes.substring(0, Math.min(notes.length(), 500)).trim());
 
@@ -204,6 +212,11 @@ public class RenderServiceClient {
         } catch (Exception e) {
             return List.of();
         }
+    }
+
+    private static String hex(Object o) {
+        String v = str(o);
+        return v != null && v.trim().matches("#[0-9a-fA-F]{6}") ? v.trim() : null;
     }
 
     private static String str(Object o) {
