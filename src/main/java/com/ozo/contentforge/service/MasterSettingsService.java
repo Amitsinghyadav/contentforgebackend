@@ -125,6 +125,7 @@ public class MasterSettingsService {
         s.put("brollOutputRatio", "9:16");
         s.put("subtitlesEnabled", true);
         s.put("captionLanguage", "Hinglish"); // "Hinglish", "Hindi", or "English"
+        s.put("renderEngine", "ffmpeg"); // "ffmpeg" (basic composite) or "remotion" (contentforgerender service)
 
         // Voice Cloning & Audio (ElevenLabs PVC)
         s.put("defaultVoiceTier", "INSTANT"); // "INSTANT" (IVC) or "PROFESSIONAL" (PVC)
