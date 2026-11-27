@@ -116,6 +116,8 @@ public class DashboardController {
             card.put("finalRenderUrl", p.getFinalRenderUrl());
             card.put("enhancedRenderUrl", p.getEnhancedRenderUrl());
             card.put("voiceAudioUrl", p.getVoiceAudioUrl());
+            card.put("audioSamplesJson", p.getAudioSamplesJson());
+            card.put("selectedAudioTone", p.getSelectedAudioTone());
             card.put("scheduledAt", p.getScheduledAt());
             card.put("publishedAt", p.getPublishedAt());
             card.put("permalink", p.getPublishedPermalink());

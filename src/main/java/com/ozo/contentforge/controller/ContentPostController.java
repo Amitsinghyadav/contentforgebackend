@@ -61,6 +61,8 @@ public class ContentPostController {
         pipeline.put("finalRenderUrl", post.getFinalRenderUrl());
         pipeline.put("enhancedRenderUrl", post.getEnhancedRenderUrl());
         pipeline.put("voiceAudioUrl", post.getVoiceAudioUrl());
+        pipeline.put("audioSamplesJson", post.getAudioSamplesJson());
+        pipeline.put("selectedAudioTone", post.getSelectedAudioTone());
         pipeline.put("scheduledAt", post.getScheduledAt());
         pipeline.put("publishedAt", post.getPublishedAt());
         pipeline.put("permalink", post.getPublishedPermalink());
@@ -118,6 +120,21 @@ public class ContentPostController {
         }
 
         return ResponseEntity.ok(postService.approveText(id, script, voiceover, caption, cta, reviewer, hook, slides, enhance));
+    }
+
+    @PostMapping("/{id}/approve-audio")
+    public ResponseEntity<ContentPostEntity> approveAudio(@PathVariable("id") Long id,
+                                                          @RequestBody(required = false) Map<String, Object> body) {
+        String sampleId = body != null && body.get("sampleId") != null ? body.get("sampleId").toString() : null;
+        String audioUrl = body != null && body.get("audioUrl") != null ? body.get("audioUrl").toString() : null;
+        String tone = body != null && body.get("tone") != null ? body.get("tone").toString() : null;
+        String reviewer = body != null && body.get("reviewerId") != null ? body.get("reviewerId").toString() : "admin";
+        return ResponseEntity.ok(postService.approveAudio(id, sampleId, audioUrl, tone, reviewer));
+    }
+
+    @PostMapping("/{id}/regenerate-audio-samples")
+    public ResponseEntity<ContentPostEntity> regenerateAudioSamples(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(postService.regenerateAudioSamples(id));
     }
 
     @PostMapping("/{id}/retry-media")

@@ -117,7 +117,11 @@ public class ContentBatchService {
                 : (String) settings.getOrDefault("targetAudience", "Target customers and community followers");
 
         int totalNeeded = Math.max(pendingEvents.size(), 1);
-        List<String> dailyTopics = aiProviderService.generateDailyTopics(industry, targetAudience, brandTone, Math.max(totalNeeded, 5), date);
+        List<String> existingTitles = plannedEvents.stream()
+                .map(ContentCalendarEventEntity::getTitle)
+                .filter(t -> t != null && !t.isBlank() && !isGenericPlaceholderTopic(t, settings, industry))
+                .toList();
+        List<String> dailyTopics = aiProviderService.generateDailyTopics(industry, targetAudience, brandTone, Math.max(totalNeeded, 5), date, existingTitles);
 
         int plannedReels = 0;
         int plannedPosts = 0;
@@ -146,7 +150,7 @@ public class ContentBatchService {
             log.info("Generating batch for date {} for {} pending items in Reel Planner (skipping completed)...", date, pendingEvents.size());
             for (ContentCalendarEventEntity ev : pendingEvents) {
                 ContentType cType = ev.getContentType() != null ? ev.getContentType() : ContentType.REEL;
-                String topic = (ev.getTitle() != null && !ev.getTitle().isBlank() && !ev.getTitle().contains("Daily Preventive Health"))
+                String topic = !isGenericPlaceholderTopic(ev.getTitle(), settings, industry)
                         ? ev.getTitle()
                         : (topicCursor < dailyTopics.size() ? dailyTopics.get(topicCursor++) : "Essential Guidance on " + industry);
 
@@ -163,8 +167,9 @@ public class ContentBatchService {
                 else if (cType == ContentType.POST) plannedPosts++;
                 else if (cType == ContentType.CAROUSEL) plannedCarousels++;
 
+                ev.setTitle(topic);
                 ev.setStatus("GENERATED");
-                calendarService.updateEvent(ev.getId(), ev.getTitle(), ev.getEventDate(), ev.getRecurrenceRule(),
+                calendarService.updateEvent(ev.getId(), topic, ev.getEventDate(), ev.getRecurrenceRule(),
                         ev.getThemeBrief(), ev.getExtraContentCount(), ev.getContentType(), ev.getCarouselSlideCount(),
                         ev.getLanguage(), ev.getProductionMode(), ev.getPublishTime(), ev.getReplaceQuota(), "GENERATED");
             }
@@ -232,5 +237,14 @@ public class ContentBatchService {
 
         batch.setStatus("COMPLETED");
         return batchRepository.save(batch);
+    }
+
+    private boolean isGenericPlaceholderTopic(String title, Map<String, Object> settings, String industry) {
+        if (title == null || title.isBlank()) return true;
+        String lower = title.trim().toLowerCase();
+        if (lower.contains("daily preventive health")) return true;
+        String tagline = String.valueOf(settings.getOrDefault("tagline", "")).trim().toLowerCase();
+        String indLower = industry != null ? industry.trim().toLowerCase() : "";
+        return !tagline.isEmpty() && lower.startsWith(tagline) && (indLower.isEmpty() || lower.contains(indLower));
     }
 }

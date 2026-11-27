@@ -70,8 +70,12 @@ public class DatabaseSchemaInitializer {
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS render_job_id VARCHAR(64)",
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS enhance_requested BOOLEAN",
                 "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS enhanced_render_url TEXT",
-                // Hibernate's enum check constraint would refuse the new RENDER_SERVICE provider on existing databases
-                "ALTER TABLE media_jobs DROP CONSTRAINT IF EXISTS media_jobs_provider_check"
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS audio_samples_json TEXT",
+                "ALTER TABLE content_posts ADD COLUMN IF NOT EXISTS selected_audio_tone VARCHAR(100)",
+                // Hibernate's enum check constraint would refuse the new RENDER_SERVICE provider or new status/approval enums on existing databases
+                "ALTER TABLE media_jobs DROP CONSTRAINT IF EXISTS media_jobs_provider_check",
+                "ALTER TABLE content_posts DROP CONSTRAINT IF EXISTS content_posts_status_check",
+                "ALTER TABLE content_approvals DROP CONSTRAINT IF EXISTS content_approvals_approval_type_check"
         };
 
         for (String sql : alterStatements) {

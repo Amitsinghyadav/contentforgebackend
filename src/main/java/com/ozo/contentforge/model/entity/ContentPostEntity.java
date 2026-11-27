@@ -100,6 +100,12 @@ public class ContentPostEntity {
     @Column(name = "voice_audio_url")
     private String voiceAudioUrl;
 
+    @Column(name = "audio_samples_json", columnDefinition = "TEXT")
+    private String audioSamplesJson;
+
+    @Column(name = "selected_audio_tone", length = 100)
+    private String selectedAudioTone;
+
     @Column(name = "avatar_video_url")
     private String avatarVideoUrl;
 

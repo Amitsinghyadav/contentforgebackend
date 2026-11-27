@@ -135,7 +135,7 @@ public class MasterSettingsService {
 
         // Voice Cloning & Audio (ElevenLabs PVC)
         s.put("defaultVoiceTier", "INSTANT"); // "INSTANT" (IVC) or "PROFESSIONAL" (PVC)
-        s.put("elevenLabsTtsModel", "eleven_multilingual_v2");
+        s.put("elevenLabsTtsModel", "eleven_v4");
         s.put("pvcMinAudioMinutes", 30);
         s.put("pvcHighFidelityMode", true);
 

@@ -416,8 +416,17 @@ public class ContentPostService {
             }
         }
 
-        post.setStatus(PostStatus.TEXT_APPROVED);
         post.setClinicalReviewApproved(true);
+        post.setErrorMessage(null);
+
+        if (post.getContentType() == ContentType.REEL) {
+            post.setAudioSamplesJson(null);
+            post.setSelectedAudioTone(null);
+            post.setVoiceAudioUrl(null);
+            post.setStatus(PostStatus.GENERATING_AUDIO_SAMPLES);
+        } else {
+            post.setStatus(PostStatus.TEXT_APPROVED);
+        }
         postRepository.save(post);
 
         // Record Approval
@@ -426,16 +435,191 @@ public class ContentPostService {
                 .approvalType(ApprovalType.TEXT_APPROVAL)
                 .decision(ApprovalDecision.APPROVED)
                 .reviewerId(reviewerId != null ? reviewerId : "admin")
-                .comments("Text, script and storyboard approved for media generation")
+                .comments(post.getContentType() == ContentType.REEL
+                        ? "Script approved; generating 3 ElevenLabs audio tone samples"
+                        : "Text, script and storyboard approved for media generation")
                 .decidedAt(LocalDateTime.now())
                 .build());
 
-        // Trigger Media Generation asynchronously in background thread so approval transaction commits immediately
+        if (post.getContentType() == ContentType.REEL) {
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    generateAudioSamples(postId);
+                } catch (Exception e) {
+                    log.error("Audio sample generation background error for post {}: {}", postId, e.getMessage(), e);
+                }
+            });
+        } else {
+            // Trigger Media Generation asynchronously in background thread so approval transaction commits immediately
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    triggerMediaGeneration(postId);
+                } catch (Exception e) {
+                    log.error("Media generation background error for post {}: {}", postId, e.getMessage(), e);
+                }
+            });
+        }
+
+        return post;
+    }
+
+    private String resolveVoiceId(ContentPostEntity post) {
+        if (post.getVoiceId() != null) {
+            Optional<VoiceLibraryEntity> explicit = voiceRepository.findById(post.getVoiceId());
+            if (explicit.isPresent() && explicit.get().getProviderVoiceId() != null && !explicit.get().getProviderVoiceId().isBlank()) {
+                return explicit.get().getProviderVoiceId();
+            }
+        }
+        VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
+        return (voice != null && voice.getProviderVoiceId() != null && !voice.getProviderVoiceId().isBlank())
+                ? voice.getProviderVoiceId()
+                : "rRAzMEZ6U57ivzmuPBhL";
+    }
+
+    private String buildReelNarrationText(ContentPostEntity post, List<ContentSceneEntity> scenes) {
+        StringBuilder narrationBuilder = new StringBuilder();
+        for (ContentSceneEntity sc : scenes) {
+            if (sc.getSpokenText() != null && !sc.getSpokenText().isBlank()) {
+                if (narrationBuilder.length() > 0) narrationBuilder.append(" ");
+                narrationBuilder.append(sc.getSpokenText().trim());
+            }
+        }
+        if (narrationBuilder.length() > 0) {
+            return narrationBuilder.toString();
+        }
+        return ((post.getPresenterScript() != null ? post.getPresenterScript() : "") + " "
+                + (post.getVoiceoverScript() != null ? post.getVoiceoverScript() : "")).trim();
+    }
+
+    /**
+     * Generates 3 ElevenLabs audio samples in different tones and pauses at PENDING_AUDIO_APPROVAL.
+     */
+    public void generateAudioSamples(Long postId) {
+        ContentPostEntity post = postRepository.findById(postId).orElse(null);
+        if (post == null) return;
+
+        try {
+            post.setStatus(PostStatus.GENERATING_AUDIO_SAMPLES);
+            post.setErrorMessage(null);
+            postRepository.save(post);
+
+            List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
+            String narrationText = buildReelNarrationText(post, scenes);
+            String voiceId = resolveVoiceId(post);
+
+            List<Map<String, Object>> samples = aiProviderService.generateVoiceAudioSamples(postId, narrationText, voiceId);
+            for (Map<String, Object> sample : samples) {
+                Object urlObj = sample.get("audioUrl");
+                if (urlObj != null) {
+                    double dur = probeMediaDuration(urlObj.toString());
+                    if (dur > 0) {
+                        sample.put("durationSeconds", Math.round(dur * 10.0) / 10.0);
+                    }
+                }
+            }
+
+            post.setAudioSamplesJson(objectMapper.writeValueAsString(samples));
+            post.setStatus(PostStatus.PENDING_AUDIO_APPROVAL);
+            postRepository.save(post);
+            log.info("Generated {} audio tone samples for post {}. Awaiting audio approval.", samples.size(), postId);
+        } catch (Exception e) {
+            log.error("Failed generating audio samples for post {}: {}", postId, e.getMessage(), e);
+            post.setStatus(PostStatus.FAILED);
+            post.setErrorMessage("Audio sample generation error: " + e.getMessage());
+            postRepository.save(post);
+        }
+    }
+
+    /**
+     * Regenerates the 3 ElevenLabs audio tone samples for a reel post.
+     */
+    @Transactional
+    public ContentPostEntity regenerateAudioSamples(Long postId) {
+        ContentPostEntity post = postRepository.findById(postId)
+                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+        if (post.getContentType() != ContentType.REEL) {
+            throw new IllegalStateException("Audio sample generation is only supported for REEL posts.");
+        }
+
+        post.setStatus(PostStatus.GENERATING_AUDIO_SAMPLES);
+        post.setErrorMessage(null);
+        post.setAudioSamplesJson(null);
+        post.setSelectedAudioTone(null);
+        post.setVoiceAudioUrl(null);
+        post = postRepository.save(post);
+
+        final Long targetPostId = postId;
+        java.util.concurrent.CompletableFuture.runAsync(() -> generateAudioSamples(targetPostId));
+        return post;
+    }
+
+    /**
+     * Phase 3.5: Audio Approval
+     * Locks the chosen ElevenLabs audio tone sample and triggers Step 2 media generation (Avatar, B-roll, Merge).
+     */
+    @Transactional
+    public ContentPostEntity approveAudio(Long postId, String sampleId, String audioUrl, String tone, String reviewerId) {
+        ContentPostEntity post = postRepository.findById(postId)
+                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+
+        String resolvedUrl = audioUrl;
+        String resolvedTone = tone;
+
+        if (post.getAudioSamplesJson() != null && !post.getAudioSamplesJson().isBlank()) {
+            try {
+                List<Map<String, Object>> samples = objectMapper.readValue(
+                        post.getAudioSamplesJson(), new TypeReference<List<Map<String, Object>>>() {}
+                );
+                Map<String, Object> matched = null;
+                if (sampleId != null && !sampleId.isBlank()) {
+                    matched = samples.stream()
+                            .filter(s -> sampleId.equals(String.valueOf(s.get("id"))))
+                            .findFirst()
+                            .orElse(null);
+                }
+                if (matched == null && audioUrl != null && !audioUrl.isBlank()) {
+                    matched = samples.stream()
+                            .filter(s -> audioUrl.equals(String.valueOf(s.get("audioUrl"))))
+                            .findFirst()
+                            .orElse(null);
+                }
+                if (matched == null && !samples.isEmpty()) {
+                    matched = samples.get(0);
+                }
+                if (matched != null) {
+                    if (matched.get("audioUrl") != null) resolvedUrl = matched.get("audioUrl").toString();
+                    if (matched.get("tone") != null) resolvedTone = matched.get("tone").toString();
+                }
+            } catch (Exception e) {
+                log.warn("Could not parse audioSamplesJson for post {}: {}", postId, e.getMessage());
+            }
+        }
+
+        if (resolvedUrl == null || resolvedUrl.isBlank()) {
+            throw new IllegalStateException("No audio sample URL available to approve for post " + postId);
+        }
+
+        post.setVoiceAudioUrl(resolvedUrl);
+        post.setSelectedAudioTone(resolvedTone != null ? resolvedTone : "Approved Voice");
+        post.setStatus(PostStatus.AUDIO_APPROVED);
+        post.setErrorMessage(null);
+        post = postRepository.save(post);
+
+        approvalRepository.save(ContentApprovalEntity.builder()
+                .postId(postId)
+                .approvalType(ApprovalType.AUDIO_APPROVAL)
+                .decision(ApprovalDecision.APPROVED)
+                .reviewerId(reviewerId != null ? reviewerId : "admin")
+                .comments("Audio tone approved: " + post.getSelectedAudioTone())
+                .decidedAt(LocalDateTime.now())
+                .build());
+
+        final Long targetPostId = postId;
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
-                triggerMediaGeneration(postId);
+                triggerMediaGeneration(targetPostId);
             } catch (Exception e) {
-                log.error("Media generation background error for post {}: {}", postId, e.getMessage(), e);
+                log.error("Media generation background error after audio approval for post {}: {}", targetPostId, e.getMessage(), e);
             }
         });
 
@@ -451,9 +635,15 @@ public class ContentPostService {
         ContentPostEntity post = postRepository.findById(postId)
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
 
+        if (post.getContentType() == ContentType.REEL && (post.getVoiceAudioUrl() == null || post.getVoiceAudioUrl().isBlank())) {
+            return regenerateAudioSamples(postId);
+        }
+
         post.setStatus(PostStatus.MEDIA_GENERATING);
         post.setErrorMessage(null);
-        post.setVoiceAudioUrl(null);
+        if (post.getSelectedAudioTone() == null || post.getSelectedAudioTone().isBlank()) {
+            post.setVoiceAudioUrl(null);
+        }
         post.setAvatarVideoUrl(null);
         post.setFinalRenderUrl(null);
         post = postRepository.save(post);
@@ -588,23 +778,9 @@ public class ContentPostService {
             if (post.getPresenterId() != null) {
                 explicitPresenter = presenterRepository.findById(post.getPresenterId()).orElse(null);
             }
-            VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
-            String voiceId = (voice != null && voice.getProviderVoiceId() != null && !voice.getProviderVoiceId().isBlank())
-                    ? voice.getProviderVoiceId()
-                    : "rRAzMEZ6U57ivzmuPBhL";
-
+            String voiceId = resolveVoiceId(post);
             List<ContentSceneEntity> scenes = sceneRepository.findByPostIdOrderBySceneNumberAsc(postId);
-            StringBuilder narrationBuilder = new StringBuilder();
-            for (ContentSceneEntity sc : scenes) {
-                if (sc.getSpokenText() != null && !sc.getSpokenText().isBlank()) {
-                    if (narrationBuilder.length() > 0) narrationBuilder.append(" ");
-                    narrationBuilder.append(sc.getSpokenText().trim());
-                }
-            }
-            String narrationText = narrationBuilder.length() > 0
-                    ? narrationBuilder.toString()
-                    : ((post.getPresenterScript() != null ? post.getPresenterScript() : "") + " "
-                       + (post.getVoiceoverScript() != null ? post.getVoiceoverScript() : ""));
+            String narrationText = buildReelNarrationText(post, scenes);
 
             boolean audioNeedsGeneration = post.getVoiceAudioUrl() == null || post.getVoiceAudioUrl().isBlank();
             if (!audioNeedsGeneration) {

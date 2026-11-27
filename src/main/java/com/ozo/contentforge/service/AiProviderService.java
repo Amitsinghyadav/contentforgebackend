@@ -51,13 +51,25 @@ public class AiProviderService {
     @Value("${openai.image.model:gpt-image-1.5}")
     private String openAiImageModel;
 
+    @Value("${anthropic.api.key:}")
+    private String anthropicKey;
+
+    @Value("${anthropic.api.model:claude-sonnet-5-5}")
+    private String anthropicModel;
+
+    @Value("${anthropic.api.base-url:https://api.anthropic.com/v1}")
+    private String anthropicBaseUrl;
+
+    @Value("${anthropic.api.version:2023-06-01}")
+    private String anthropicVersion;
+
     @Value("${elevenlabs.api.key:}")
     private String elevenLabsKey;
 
     @Value("${elevenlabs.api.base-url:https://api.elevenlabs.io/v1}")
     private String elevenLabsBaseUrl;
 
-    @Value("${elevenlabs.voice.model:eleven_multilingual_v2}")
+    @Value("${elevenlabs.voice.model:eleven_v4}")
     private String elevenLabsModel;
 
     @Value("${heygen.api.key:}")
@@ -124,78 +136,76 @@ public class AiProviderService {
     }
 
     // =========================================================================
-    // 0. AI TOPIC SUGGESTION (DYNAMIC FOR MULTI-BUSINESS B2B PARTNERSHIPS)
+    // 0. AI TOPIC SUGGESTION (ANTHROPIC CLAUDE SONNET 5.5 + OPENAI FALLBACK)
     // =========================================================================
     public List<String> generateDailyTopics(String industry, String targetAudience, String brandTone, int count, LocalDate date) {
-        if (!isRealKey(openAiKey)) {
-            throw new IllegalStateException("OpenAI API key is missing or unconfigured. Please configure 'openai.api.key' in application.properties or Master Settings.");
+        return generateDailyTopics(industry, targetAudience, brandTone, count, date, List.of());
+    }
+
+    public List<String> generateDailyTopics(String industry, String targetAudience, String brandTone, int count, LocalDate date, List<String> excludeTopics) {
+        if (!isRealKey(anthropicKey) && !isRealKey(openAiKey)) {
+            throw new IllegalStateException("Neither Anthropic nor OpenAI API key is configured. Please configure 'anthropic.api.key' (Claude Sonnet 5.5) in application.properties.");
         }
 
         try {
-            List<String> topics = callOpenAiForTopics(industry, targetAudience, brandTone, count, date);
+            List<String> topics = callAiForTopics(industry, targetAudience, brandTone, count, date, excludeTopics);
             if (topics == null || topics.isEmpty()) {
-                throw new IllegalStateException("OpenAI returned an empty topic list for industry: " + industry);
+                throw new IllegalStateException("AI returned an empty topic list for industry: " + industry);
             }
-            log.info("Successfully generated {} dynamic AI topics from OpenAI for industry '{}' on date {}", topics.size(), industry, date);
+            log.info("Successfully generated {} dynamic AI topics ({}) for industry '{}' on date {}",
+                    topics.size(), isRealKey(anthropicKey) ? anthropicModel : openAiModel, industry, date);
             return topics;
         } catch (Exception e) {
-            String errorMsg = extractOpenAiErrorMessage(e);
-            log.error("OpenAI topic generation failed: {}", errorMsg);
+            String errorMsg = isRealKey(anthropicKey) ? extractAnthropicErrorMessage(e) : extractOpenAiErrorMessage(e);
+            log.error("AI topic generation failed: {}", errorMsg);
             throw new RuntimeException("AI Topic Suggestion Failed: " + errorMsg, e);
         }
     }
 
-    private List<String> callOpenAiForTopics(String industry, String targetAudience, String brandTone, int count, LocalDate date) throws Exception {
+    private List<String> callAiForTopics(String industry, String targetAudience, String brandTone, int count, LocalDate date, List<String> excludeTopics) throws Exception {
         String effectiveIndustry = (industry != null && !industry.isBlank()) ? industry : "General Business & Lifestyle";
         String effectiveAudience = (targetAudience != null && !targetAudience.isBlank()) ? targetAudience : "Target customers and community followers";
         String effectiveTone = (brandTone != null && !brandTone.isBlank()) ? brandTone : "Engaging, authoritative, relatable, and authentic";
+        String exclusionBlock = (excludeTopics != null && !excludeTopics.isEmpty())
+                ? "\n            Already scheduled / used topics (DO NOT repeat or closely paraphrase any of these — pick completely fresh angles):\n            - " + String.join("\n            - ", excludeTopics) + "\n"
+                : "";
 
         String prompt = String.format("""
-            You are a world-class social media director and creative strategist for %s.
+            You are a top-tier Instagram Reels creative director and viral social media strategist for %s.
             Industry / Business Domain: %s
             Target Audience: %s
             Brand Voice & Tone: %s
             Target Date: %s
             Number of distinct topics required: %d
-
+            %s
             Instructions:
-            Generate %d fresh, unique, viral, and high-retention video topics specifically tailored to the '%s' industry.
-            Do NOT use generic boilerplate. Tailor each topic to what real people in this market actually ask, search for, or struggle with right now.
-            Consider:
-            1. Real-world pain points, pressing questions, and high-stakes choices faced by %s.
-            2. Trending news, emerging market shifts, or seasonal relevance for %s.
-            3. Common misconceptions, practical comparisons, and actionable step-by-step insights in %s.
-            4. Varied formats across the list (e.g. myth-busting, insider secrets, beginner traps, comparative breakdown).
+            Generate %d fresh, scroll-stopping, high-retention Instagram Reel / Carousel topics specifically tailored to '%s' that a real, charismatic social media influencer would film right now.
+            Do NOT use generic, textbook, or corporate-sounding titles. Think like a creator chasing high watch-time, saves, and shares on Instagram's algorithm:
+            1. Curiosity-gap hooks, contrarian takes, myth-busting ("Stop doing X"), and "nobody talks about this" insider truths for %s.
+            2. Topics that naturally invite compelling visual B-roll cutaways, comparisons, or "wait till the end" reveals in %s.
+            3. Real-world daily struggles, hidden mistakes, and practical step-by-step wins relevant around %s.
+            4. Conversational, punchy framing that makes someone pause mid-scroll and send the reel to a friend.
+            5. Every single topic in the list MUST explore a distinctly different sub-topic, hook style, and angle.
 
-            Format each topic as a clear, high-retention headline for an Instagram Reel or Carousel.
+            Format each topic as a punchy, creator-style headline/angle for an Instagram Reel or Carousel.
 
-            Output ONLY a JSON object in this exact schema without any markdown formatting:
+            Output ONLY a valid JSON object in this exact schema without any markdown formatting:
             {
               "topics": [
                 "Topic 1...",
                 "Topic 2..."
               ]
             }
-            """, effectiveIndustry, effectiveIndustry, effectiveAudience, effectiveTone, date, count, count, effectiveIndustry, effectiveAudience, date, effectiveIndustry);
+            """, effectiveIndustry, effectiveIndustry, effectiveAudience, effectiveTone, date, count, exclusionBlock, count, effectiveIndustry, effectiveAudience, effectiveIndustry, date);
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(openAiKey);
-
-        Map<String, Object> body = new HashMap<>();
-        body.put("model", openAiModel);
-        body.put("messages", List.of(
-                Map.of("role", "system", "content", "You are an expert AI social media strategist generating dynamic, industry-tailored topics as valid JSON."),
-                Map.of("role", "user", "content", prompt)
-        ));
-        body.put("response_format", Map.of("type", "json_object"));
-
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-        ResponseEntity<String> response = restTemplate.postForEntity(openAiBaseUrl + "/chat/completions", entity, String.class);
-
-        JsonNode root = objectMapper.readTree(response.getBody());
-        String content = root.path("choices").get(0).path("message").path("content").asText();
-        JsonNode jsonNode = objectMapper.readTree(content);
+        String content = callLlmText(
+                "You are an expert Instagram viral content director generating creator-style, algorithm-friendly topics as strict valid JSON.",
+                prompt,
+                1600,
+                0.85,
+                true
+        );
+        JsonNode jsonNode = objectMapper.readTree(stripMarkdownJsonFences(content));
 
         List<String> list = new ArrayList<>();
         if (jsonNode.has("topics") && jsonNode.get("topics").isArray()) {
@@ -205,6 +215,122 @@ public class AiProviderService {
             }
         }
         return list;
+    }
+
+    private String callLlmText(String systemPrompt, String userPrompt, int maxTokens, double temperature, boolean jsonMode) throws Exception {
+        if (isRealKey(anthropicKey)) {
+            try {
+                return callAnthropicMessages(systemPrompt, userPrompt, maxTokens, temperature);
+            } catch (Exception e) {
+                if (isRealKey(openAiKey)) {
+                    log.warn("Anthropic call failed ({}); falling back to OpenAI '{}'.", extractAnthropicErrorMessage(e), openAiModel);
+                } else {
+                    throw e;
+                }
+            }
+        }
+        if (!isRealKey(openAiKey)) {
+            throw new IllegalStateException("Neither Anthropic nor OpenAI API key is configured. Please configure 'anthropic.api.key' in application.properties.");
+        }
+        if (!isRealKey(anthropicKey)) {
+            log.warn("Anthropic API key not configured ('anthropic.api.key'); falling back to OpenAI '{}'.", openAiModel);
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(openAiKey);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("model", openAiModel);
+        body.put("messages", List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content", userPrompt)
+        ));
+        body.put("max_tokens", maxTokens);
+        body.put("temperature", temperature);
+        if (jsonMode) {
+            body.put("response_format", Map.of("type", "json_object"));
+        }
+
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(openAiBaseUrl + "/chat/completions", entity, String.class);
+        JsonNode root = objectMapper.readTree(response.getBody());
+        return root.path("choices").get(0).path("message").path("content").asText();
+    }
+
+    private String callAnthropicMessages(String systemPrompt, String userPrompt, int maxTokens, double temperature) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("x-api-key", anthropicKey.trim());
+        headers.set("anthropic-version", (anthropicVersion != null && !anthropicVersion.isBlank()) ? anthropicVersion : "2023-06-01");
+
+        String effectiveModel = (anthropicModel != null && !anthropicModel.isBlank()) ? anthropicModel.trim() : "claude-sonnet-5-5";
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", effectiveModel);
+        body.put("max_tokens", maxTokens);
+        body.put("temperature", temperature);
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            body.put("system", systemPrompt);
+        }
+        body.put("messages", List.of(
+                Map.of("role", "user", "content", userPrompt)
+        ));
+
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(anthropicBaseUrl + "/messages", entity, String.class);
+        JsonNode root = objectMapper.readTree(response.getBody());
+        JsonNode contentArray = root.path("content");
+        if (contentArray.isArray()) {
+            StringBuilder sb = new StringBuilder();
+            for (JsonNode block : contentArray) {
+                if ("text".equals(block.path("type").asText())) {
+                    sb.append(block.path("text").asText());
+                }
+            }
+            if (sb.length() > 0) {
+                return sb.toString().trim();
+            }
+        }
+        throw new RuntimeException("Anthropic API returned unexpected response format: " + response.getBody());
+    }
+
+    private String stripMarkdownJsonFences(String text) {
+        if (text == null) return "";
+        String trimmed = text.trim();
+        if (trimmed.startsWith("```")) {
+            int firstNewline = trimmed.indexOf('\n');
+            if (firstNewline > 0) {
+                trimmed = trimmed.substring(firstNewline + 1);
+            }
+            int lastFence = trimmed.lastIndexOf("```");
+            if (lastFence >= 0) {
+                trimmed = trimmed.substring(0, lastFence);
+            }
+        }
+        trimmed = trimmed.trim();
+        int firstBrace = trimmed.indexOf('{');
+        int lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            return trimmed.substring(firstBrace, lastBrace + 1);
+        }
+        return trimmed;
+    }
+
+    public String extractAnthropicErrorMessage(Exception e) {
+        if (e instanceof org.springframework.web.client.HttpStatusCodeException httpEx) {
+            String responseBody = httpEx.getResponseBodyAsString();
+            try {
+                JsonNode root = objectMapper.readTree(responseBody);
+                if (root.has("error") && root.get("error").has("message")) {
+                    String msg = root.get("error").get("message").asText();
+                    String type = root.get("error").has("type") ? root.get("error").get("type").asText() : "error";
+                    return String.format("Anthropic API error %d [%s]: %s", httpEx.getStatusCode().value(), type, msg);
+                }
+            } catch (Exception ignored) {}
+            return String.format("Anthropic API returned HTTP %d %s: %s",
+                    httpEx.getStatusCode().value(), httpEx.getStatusText(), responseBody);
+        }
+        return e.getMessage();
     }
 
     // =========================================================================
@@ -282,26 +408,26 @@ public class AiProviderService {
                                                            int brollCount, int brollClipDuration,
                                                            boolean attachEndCta, String brandCtaText,
                                                            int carouselSlideCount, String videoAspectRatio) {
-        if (!isRealKey(openAiKey)) {
-            throw new IllegalStateException("OpenAI API key is missing or unconfigured. Please configure 'openai.api.key' in application.properties or Master Settings.");
+        if (!isRealKey(anthropicKey) && !isRealKey(openAiKey)) {
+            throw new IllegalStateException("Neither Anthropic nor OpenAI API key is configured. Please configure 'anthropic.api.key' (Claude Sonnet 5.5) in application.properties.");
         }
 
         try {
-            return callOpenAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience,
+            return callAiForStoryboard(topic, industry, brandTone, contentType, mode, durationSeconds, targetAudience,
                     brollCount, brollClipDuration, attachEndCta, brandCtaText, carouselSlideCount, videoAspectRatio);
         } catch (Exception e) {
-            String errorMsg = extractOpenAiErrorMessage(e);
-            log.error("OpenAI script and storyboard generation failed: {}", errorMsg);
+            String errorMsg = isRealKey(anthropicKey) ? extractAnthropicErrorMessage(e) : extractOpenAiErrorMessage(e);
+            log.error("AI script and storyboard generation failed: {}", errorMsg);
             throw new RuntimeException("AI Script Generation Failed: " + errorMsg, e);
         }
     }
 
-    private Map<String, Object> callOpenAiForStoryboard(String topic, String industry, String brandTone,
-                                                         ContentType contentType, PostMode mode,
-                                                         int durationSeconds, String targetAudience,
-                                                         int brollCount, int brollClipDuration,
-                                                         boolean attachEndCta, String brandCtaText,
-                                                         int carouselSlideCount, String videoAspectRatio) throws Exception {
+    private Map<String, Object> callAiForStoryboard(String topic, String industry, String brandTone,
+                                                      ContentType contentType, PostMode mode,
+                                                      int durationSeconds, String targetAudience,
+                                                      int brollCount, int brollClipDuration,
+                                                      boolean attachEndCta, String brandCtaText,
+                                                      int carouselSlideCount, String videoAspectRatio) throws Exception {
         String effectiveIndustry = (industry != null && !industry.isBlank()) ? industry : "Business & Lifestyle";
         String effectiveAudience = (targetAudience != null && !targetAudience.isBlank()) ? targetAudience : "Target customers and followers";
         String effectiveTone = (brandTone != null && !brandTone.isBlank()) ? brandTone : "Engaging, authoritative, relatable, and authentic";
@@ -451,9 +577,15 @@ public class AiProviderService {
 %s
             4. REEL CALL-TO-ACTION (CTA) RULES:
 %s
-            5. CRITICAL RULE FOR B-ROLL VISUAL PROMPTS:
+            5. REAL INFLUENCER & INSTAGRAM ALGORITHM RETENTION RULES:
+               - Write like a real, charismatic Indian social media influencer speaking to a friend on camera — NEVER like a corporate brochure, textbook, or generic AI assistant.
+               - 0-3s SCROLL-STOPPING HOOK (Scene 1): Open with a bold pattern interrupt, shocking truth, relatable mistake, or curiosity gap that stops the thumb immediately.
+               - OPEN LOOP ("PEOPLE WAIT FOR IT"): Plant a payoff promise early (e.g. "...aur jo aakhri point hai na, woh 90%% log galat karte hain — end tak zaroor dekhna") so viewers watch till completion. Instagram's algorithm heavily boosts Reels with high watch-time, replays, saves, and shares!
+               - SHARE / SAVE TRIGGER: Naturally weave in a moment that makes viewers want to save or share ("Isko abhi save kar lo" / "Us friend ko bhejo jo...").
+            6. CRITICAL RULE FOR ENGAGING B-ROLL VISUAL PROMPTS & SEAMLESS HANDOFFS:
                - NEVER output generic placeholders like "capturing key concept of scene 2" or "b-roll related to topic".
-               - Write a vivid, cinematic %s (%s) Runway text-to-video prompt detailing what is physically seen on camera (specific subjects, equipment, environment, lighting, camera glide, depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
+               - Make B-roll scenes a core retention driver! The AVATAR scene right before a B-roll should naturally set up the visual ("Dekho actually hota kya hai...", "Iska real proof dekho..."), and the B-roll's "spokenText" must continue the story seamlessly while the viewer watches the cutaway.
+               - Write a vivid, cinematic %s (%s) Runway text-to-video prompt detailing what is physically seen on camera (domain-authentic subjects, macro/close-up details, environment, dramatic lighting, smooth camera glide, shallow depth of field, 24fps motion blur) directly depicting the exact concept spoken in that scene!
             6. CRITICAL RULE FOR SPOKEN TEXT - EMOTIONAL DELIVERY & ELEVENLABS VOICE DIRECTION:
                - Every scene (both AVATAR and BROLL) MUST have a specific "spokenText" field.
                - For B-roll scenes, "spokenText" is the voiceover narration spoken while that B-roll is visible.
@@ -554,24 +686,14 @@ public class AiProviderService {
             totalScenes, targetReelDuration,
             targetSlideCount);
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(openAiKey);
-
-        Map<String, Object> body = new HashMap<>();
-        body.put("model", openAiModel);
-        body.put("messages", List.of(
-                Map.of("role", "system", "content", "You are an expert AI social video and script generator returning structured JSON."),
-                Map.of("role", "user", "content", prompt)
-        ));
-        body.put("response_format", Map.of("type", "json_object"));
-
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-        ResponseEntity<String> response = restTemplate.postForEntity(openAiBaseUrl + "/chat/completions", entity, String.class);
-
-        JsonNode root = objectMapper.readTree(response.getBody());
-        String content = root.path("choices").get(0).path("message").path("content").asText();
-        return objectMapper.readValue(content, new TypeReference<Map<String, Object>>() {});
+        String content = callLlmText(
+                "You are an expert AI social media influencer scriptwriter and video director returning strict valid JSON.",
+                prompt,
+                4096,
+                0.75,
+                true
+        );
+        return objectMapper.readValue(stripMarkdownJsonFences(content), new TypeReference<Map<String, Object>>() {});
     }
 
     public String extractOpenAiErrorMessage(Exception e) {
@@ -872,12 +994,12 @@ public class AiProviderService {
         if (isRealKey(elevenLabsKey)) {
             // Apply GPT voice direction pass: transforms raw spokenText into ElevenLabs-ready
             // emotionally tagged script with [excited], [surprised], [sad] etc. inline tags.
-            String directedText = applyVoiceDirection(text);
+            String directedText = applyVoiceDirection(text, null);
             log.info("Voice direction applied. Original chars: {}, Directed chars: {}", text != null ? text.length() : 0, directedText.length());
             byte[] audioBytes = callElevenLabsTts(directedText, effectiveVoiceId);
             if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
                 log.warn("ElevenLabs TTS failed for voice '{}'. Retrying with verified default voice 'rRAzMEZ6U57ivzmuPBhL' (Amit Singh Yadav)...", effectiveVoiceId);
-                audioBytes = callElevenLabsTts(text, "rRAzMEZ6U57ivzmuPBhL");
+                audioBytes = callElevenLabsTts(directedText, "rRAzMEZ6U57ivzmuPBhL");
             }
 
             if (audioBytes != null && audioBytes.length > 500) {
@@ -893,6 +1015,112 @@ public class AiProviderService {
         throw new IllegalStateException("ElevenLabs TTS failed to generate valid audio for voice ID: " + voiceId);
     }
 
+    private record VoiceToneProfile(
+            String id,
+            String tone,
+            String description,
+            double stability,
+            double similarity,
+            double style,
+            String directionGuidance
+    ) {}
+
+    private static final List<VoiceToneProfile> ELEVENLABS_TONE_PROFILES = List.of(
+            new VoiceToneProfile(
+                    "warm_empathetic",
+                    "Warm & Empathetic",
+                    "Calm, reassuring, conversational delivery",
+                    0.45, 0.80, 0.35,
+                    "TONE TARGET: Warm, empathetic, reassuring, conversational tone. Use gentle pacing, subtle [reassuring] and [calm] tags, and natural breathing pauses."
+            ),
+            new VoiceToneProfile(
+                    "energetic_engaging",
+                    "Energetic & Engaging",
+                    "Upbeat, dynamic, high-retention social delivery",
+                    0.22, 0.75, 0.78,
+                    "TONE TARGET: Energetic, upbeat, enthusiastic, engaging social media tone. Use punchy rhythm, [excited] and [curious] tags where natural, and dynamic emphasis."
+            ),
+            new VoiceToneProfile(
+                    "authoritative_clear",
+                    "Authoritative & Clear",
+                    "Confident, crisp, expert clinical delivery",
+                    0.58, 0.85, 0.20,
+                    "TONE TARGET: Confident, authoritative, crisp, and trustworthy expert tone. Clear articulation, steady pacing, and [serious] or [thoughtful] tags only where appropriate."
+            )
+    );
+
+    /**
+     * Generates 3 ElevenLabs audio samples in distinct tones for user audio approval.
+     */
+    public List<Map<String, Object>> generateVoiceAudioSamples(Long postId, String text, String voiceId) throws Exception {
+        log.info("Generating 3 ElevenLabs tone samples for post {}...", postId);
+        MediaJobEntity job = recordJob(postId, null, JobProvider.ELEVENLABS, "GENERATE_VOICE_SAMPLES");
+
+        String effectiveVoiceId = (voiceId != null && !voiceId.isBlank() && !voiceId.startsWith("el_"))
+                ? voiceId
+                : "rRAzMEZ6U57ivzmuPBhL";
+
+        if (!isRealKey(elevenLabsKey)) {
+            job.setStatus(JobStatus.FAILED);
+            job.setErrorJson("ElevenLabs API key is not configured.");
+            mediaJobRepository.save(job);
+            throw new IllegalStateException("ElevenLabs API key is not configured.");
+        }
+
+        int charCount = text != null ? text.length() : 300;
+        List<Map<String, Object>> samples = new ArrayList<>();
+        StringBuilder failureReasons = new StringBuilder();
+
+        // Generate sequentially to avoid ElevenLabs concurrent-request (429) limits on creator/pro tiers
+        for (VoiceToneProfile profile : ELEVENLABS_TONE_PROFILES) {
+            try {
+                String directedText = applyVoiceDirection(text, profile.directionGuidance());
+                byte[] audioBytes = callElevenLabsTts(directedText, effectiveVoiceId, profile.stability(), profile.similarity(), profile.style(), failureReasons);
+                if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
+                    log.warn("ElevenLabs TTS sample '{}' failed for voice '{}'. Retrying with default voice...", profile.id(), effectiveVoiceId);
+                    audioBytes = callElevenLabsTts(directedText, "rRAzMEZ6U57ivzmuPBhL", profile.stability(), profile.similarity(), profile.style(), failureReasons);
+                }
+                if (audioBytes == null || audioBytes.length <= 500) {
+                    log.warn("ElevenLabs TTS sample '{}' returned empty/invalid audio for post {}", profile.id(), postId);
+                    continue;
+                }
+                String metaJson = objectMapper.writeValueAsString(Map.of(
+                        "provider", "ElevenLabs",
+                        "toneId", profile.id(),
+                        "tone", profile.tone()
+                ));
+                GeneratedAssetEntity asset = storageService.saveGeneratedMedia(
+                        audioBytes, ".mp3", "audio/mpeg", AssetType.AUDIO, postId, null, 45.0, metaJson
+                );
+                Map<String, Object> sample = new LinkedHashMap<>();
+                sample.put("id", profile.id());
+                sample.put("tone", profile.tone());
+                sample.put("description", profile.description());
+                sample.put("audioUrl", asset.getStorageUrl());
+                sample.put("assetId", asset.getId());
+                samples.add(sample);
+            } catch (Exception e) {
+                log.warn("Failed generating ElevenLabs sample '{}' for post {}: {}", profile.id(), postId, e.getMessage());
+                if (failureReasons.length() > 0) failureReasons.append("; ");
+                failureReasons.append(profile.id()).append(": ").append(e.getMessage());
+            }
+        }
+
+        if (samples.isEmpty()) {
+            String detail = failureReasons.length() > 0 ? " (" + failureReasons + ")" : "";
+            job.setStatus(JobStatus.FAILED);
+            job.setErrorJson("ElevenLabs TTS failed to generate any audio samples for voice ID: " + effectiveVoiceId + detail);
+            mediaJobRepository.save(job);
+            throw new IllegalStateException("ElevenLabs TTS failed to generate audio samples for voice ID: " + effectiveVoiceId + detail);
+        }
+
+        double totalChars = (double) charCount * samples.size();
+        double cost = totalChars * 0.0003;
+        completeJob(job, cost);
+        recordUsage(postId, "ELEVENLABS", resolveElevenLabsTtsModel(text), totalChars, "CHARACTERS", cost);
+        return samples;
+    }
+
     /**
      * GPT-powered Voice Direction Pass.
      * Transforms raw spokenText into an ElevenLabs-ready, emotionally expressive script.
@@ -900,10 +1128,10 @@ public class AiProviderService {
      * pacing cues, and conversational rhythm so ElevenLabs renders genuine emotion.
      * Falls back to the original text if GPT is unavailable or fails.
      */
-    private String applyVoiceDirection(String text) {
+    private String applyVoiceDirection(String text, String toneGuidance) {
         if (text == null || text.isBlank()) return text;
-        if (!isRealKey(openAiKey)) {
-            log.debug("OpenAI key not configured - skipping voice direction pass, using raw text.");
+        if (!isRealKey(anthropicKey) && !isRealKey(openAiKey)) {
+            log.debug("Neither Anthropic nor OpenAI key configured - skipping voice direction pass, using raw text.");
             return text;
         }
         try {
@@ -969,78 +1197,115 @@ CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!
 - Do NOT include unsupported production instructions as spoken text.
 """;
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(openAiKey);
+            String userInstruction = (toneGuidance != null && !toneGuidance.isBlank())
+                    ? toneGuidance + "\n\nTransform this script into an emotionally expressive ElevenLabs-ready script matching the target tone. Output ONLY the final script text with inline emotion tags. No explanations.\n\nSCRIPT:\n" + text
+                    : "Transform this script into an emotionally expressive ElevenLabs-ready script. Output ONLY the final script text with inline emotion tags. No explanations.\n\nSCRIPT:\n" + text;
 
-            Map<String, Object> body = new HashMap<>();
-            body.put("model", openAiModel);
-            body.put("messages", List.of(
-                Map.of("role", "system", "content", systemPrompt),
-                Map.of("role", "user", "content",
-                    "Transform this script into an emotionally expressive ElevenLabs-ready script. " +
-                    "Output ONLY the final script text with inline emotion tags. No explanations.\\n\\nSCRIPT:\\n" + text)
-            ));
-            body.put("max_tokens", 2000);
-            body.put("temperature", 0.7);
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                openAiBaseUrl + "/chat/completions", entity, String.class
-            );
-
-            JsonNode root = objectMapper.readTree(response.getBody());
-            String directed = root.path("choices").get(0).path("message").path("content").asText().trim();
-            if (directed.isBlank()) {
+            String directed = callLlmText(systemPrompt, userInstruction, 2000, 0.7, false);
+            if (directed == null || directed.isBlank()) {
                 log.warn("Voice direction returned empty result - falling back to original text.");
                 return text;
             }
-            return directed;
+            return directed.trim();
         } catch (Exception e) {
-            log.warn("Voice direction GPT pass failed: {} - falling back to original text.", e.getMessage());
+            log.warn("Voice direction pass failed: {} - falling back to original text.", e.getMessage());
             return text; // Graceful fallback - never break TTS pipeline
         }
     }
 
     private byte[] callElevenLabsTts(String text, String voiceId) {
+        boolean isPvc = (voiceId != null && (voiceId.startsWith("el_pvc_") || voiceId.contains("pvc")));
+        double stability  = isPvc ? 0.38 : 0.28;
+        double similarity = isPvc ? 0.88 : 0.78;
+        double style      = isPvc ? 0.55 : 0.65;
+        return callElevenLabsTts(text, voiceId, stability, similarity, style, null);
+    }
+
+    private static final java.util.regex.Pattern ELEVENLABS_AUDIO_TAG_PATTERN =
+            java.util.regex.Pattern.compile("\\[[a-zA-Z][a-zA-Z\\s-]{1,30}\\]");
+
+    private boolean supportsElevenLabsAudioTags(String modelId) {
+        if (modelId == null) return false;
+        String m = modelId.trim().toLowerCase();
+        return m.startsWith("eleven_v4") || m.startsWith("eleven_v3");
+    }
+
+    private String resolveElevenLabsTtsModel(String text) {
+        String configuredModel = elevenLabsModel;
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("xi-api-key", elevenLabsKey);
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            // PVC (Professional Voice Clone) voices need slightly higher stability to stay on-voice.
-            // For standard cloned/library voices we want:
-            //   stability LOW  â†’ more natural pitch variation & emotion (not robotic)
-            //   style HIGH     â†’ style/expressiveness exaggeration (excitement, surprise, warmth)
-            //   similarity LOW-MED â†’ allows the voice to "act" rather than just mimic baseline recording
-            //   use_speaker_boost â†’ enhances clarity and presence
-            boolean isPvc = (voiceId != null && (voiceId.startsWith("el_pvc_") || voiceId.contains("pvc")));
-            double stability       = isPvc ? 0.38 : 0.28;   // Lower = more dynamic, more emotion
-            double similarity      = isPvc ? 0.88 : 0.78;   // Mid = lets voice emote freely
-            double style           = isPvc ? 0.55 : 0.65;   // Higher = more expressive / style exaggeration
-            double speakerBoost    = 1.0;                    // always on
-
-            Map<String, Object> body = Map.of(
-                    "text", text,
-                    "model_id", elevenLabsModel,
-                    "voice_settings", Map.of(
-                            "stability", stability,
-                            "similarity_boost", similarity,
-                            "style", style,
-                            "use_speaker_boost", true
-                    )
-            );
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-            ResponseEntity<byte[]> response = restTemplate.postForEntity(
-                    elevenLabsBaseUrl + "/text-to-speech/" + voiceId, entity, byte[].class
-            );
-
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null && response.getBody().length > 500) {
-                return response.getBody();
+            Object settingVal = masterSettingsService.getAllSettings().get("elevenLabsTtsModel");
+            if (settingVal != null && !settingVal.toString().isBlank()) {
+                configuredModel = settingVal.toString().trim();
             }
         } catch (Exception e) {
-            log.warn("ElevenLabs TTS call failed for voiceId '{}': {}", voiceId, e.getMessage());
+            log.debug("Could not read elevenLabsTtsModel from MasterSettings: {}", e.getMessage());
+        }
+        if (configuredModel == null || configuredModel.isBlank()) {
+            configuredModel = "eleven_v4";
+        }
+        // Only eleven_v4 / eleven_v3 models interpret inline audio emotion tags like [surprised], [excited], [sad];
+        // v2/turbo models speak bracketed tag words literally.
+        if (!supportsElevenLabsAudioTags(configuredModel)
+                && text != null
+                && ELEVENLABS_AUDIO_TAG_PATTERN.matcher(text).find()) {
+            log.info("Detected inline ElevenLabs audio tags in script; overriding model '{}' -> 'eleven_v4' so tags control emotion instead of being read aloud.", configuredModel);
+            return "eleven_v4";
+        }
+        return configuredModel;
+    }
+
+    private byte[] callElevenLabsTts(String text, String voiceId, double stability, double similarity, double style, StringBuilder errorOut) {
+        String effectiveModel = resolveElevenLabsTtsModel(text);
+        Map<String, Object> voiceSettings = new LinkedHashMap<>();
+        if (effectiveModel.toLowerCase().startsWith("eleven_v3")) {
+            // eleven_v3 only accepts discrete stability values: 0.0 (Creative), 0.5 (Natural), 1.0 (Robust)
+            double snappedStability = stability < 0.25 ? 0.0 : (stability <= 0.75 ? 0.5 : 1.0);
+            voiceSettings.put("stability", snappedStability);
+            voiceSettings.put("similarity_boost", similarity);
+        } else {
+            voiceSettings.put("stability", stability);
+            voiceSettings.put("similarity_boost", similarity);
+            voiceSettings.put("style", style);
+            voiceSettings.put("use_speaker_boost", true);
+        }
+
+        Map<String, Object> body = Map.of(
+                "text", text,
+                "model_id", effectiveModel,
+                "voice_settings", voiceSettings
+        );
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("xi-api-key", elevenLabsKey);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                ResponseEntity<byte[]> response = restTemplate.postForEntity(
+                        elevenLabsBaseUrl + "/text-to-speech/" + voiceId, entity, byte[].class
+                );
+
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null && response.getBody().length > 500) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                String msg = extractElevenLabsErrorMessage(e);
+                log.warn("ElevenLabs TTS call attempt {} failed for voiceId '{}' (model {}): {}", attempt, voiceId, effectiveModel, msg);
+                if (attempt == 2) {
+                    if (errorOut != null) {
+                        if (errorOut.length() > 0) errorOut.append("; ");
+                        errorOut.append(msg);
+                    }
+                    return null;
+                }
+                try {
+                    Thread.sleep(1200);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
         }
         return null;
     }
