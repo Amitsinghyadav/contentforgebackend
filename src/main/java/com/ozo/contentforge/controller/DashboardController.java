@@ -154,14 +154,13 @@ public class DashboardController {
                 "quota", quotaCarousels, "generated", generatedCarousels,
                 "approved", approvedCarousels, "scheduled", scheduledCarousels, "published", publishedCarousels
         ));
-        Optional<UserSubscriptionEntity> activeSub = planService.getActiveSubscriptionForUser(null);
 
         Map<String, Object> response = new HashMap<>();
         response.put("date", targetDate);
         response.put("batchId", batchId);
         response.put("batchStatus", batchStatus);
         response.put("summary", summary);
-        response.put("subscription", activeSub.orElse(null));
+        response.put("usage", planService.getUsage(targetDate).orElse(null));
         response.put("posts", contentCards);
         response.put("calendarEvents", calendarEvents);
         response.put("masterSettings", masterSettings);

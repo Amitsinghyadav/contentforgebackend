@@ -1,5 +1,6 @@
 package com.ozo.contentforge.model.entity;
 
+import com.ozo.contentforge.tenancy.BrandOwnedEntity;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDate;
@@ -7,14 +8,14 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "daily_generation_batches", uniqueConstraints = {
-    @UniqueConstraint(columnNames = {"target_date"})
+    @UniqueConstraint(name = "uk_batch_brand_date", columnNames = {"brand_id", "target_date"})
 })
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class DailyGenerationBatchEntity {
+public class DailyGenerationBatchEntity extends BrandOwnedEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

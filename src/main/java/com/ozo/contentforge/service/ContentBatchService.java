@@ -17,7 +17,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.ozo.contentforge.model.entity.BrandEntity;
+import com.ozo.contentforge.repository.BrandRepository;
+import com.ozo.contentforge.tenancy.BrandContext;
+import org.springframework.beans.factory.ObjectProvider;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 
 @Service
@@ -33,6 +38,9 @@ public class ContentBatchService {
     private final BrandProfileRepository brandRepository;
     private final PlanService planService;
     private final ObjectMapper objectMapper;
+    private final BrandRepository brandRegistry;
+    /** Calls through the Spring proxy so @Transactional applies per brand. */
+    private final ObjectProvider<ContentBatchService> selfProvider;
 
     public ContentBatchService(DailyGenerationBatchRepository batchRepository,
                                MasterSettingsService settingsService,
@@ -41,7 +49,11 @@ public class ContentBatchService {
                                AiProviderService aiProviderService,
                                BrandProfileRepository brandRepository,
                                PlanService planService,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               BrandRepository brandRegistry,
+                               ObjectProvider<ContentBatchService> selfProvider) {
+        this.brandRegistry = brandRegistry;
+        this.selfProvider = selfProvider;
         this.batchRepository = batchRepository;
         this.settingsService = settingsService;
         this.calendarService = calendarService;
@@ -62,11 +74,14 @@ public class ContentBatchService {
      */
     @Scheduled(cron = "${contentforge.batch.cron:0 0 6 * * ?}", zone = "Asia/Kolkata")
     public void runDailyScheduledBatch() {
-        log.info("Cron triggered: Running automated daily batch generation for today...");
-        try {
-            planAndCreateBatch(LocalDate.now(), false);
-        } catch (Exception e) {
-            log.error("Automated daily batch generation failed: {}", e.getMessage(), e);
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        log.info("Daily batch: planning today's content for every active brand...");
+        for (BrandEntity brand : brandRegistry.findByActiveTrueOrderByNameAsc()) {
+            try {
+                BrandContext.runAs(brand.getId(), () -> selfProvider.getObject().planAndCreateBatch(today, false));
+            } catch (Exception e) {
+                log.error("Daily batch failed for brand '{}': {}", brand.getName(), e.getMessage(), e);
+            }
         }
     }
 
@@ -174,11 +189,7 @@ public class ContentBatchService {
                         ev.getLanguage(), ev.getProductionMode(), ev.getPublishTime(), ev.getReplaceQuota(), "GENERATED");
             }
         } else if (requestedType != null) {
-            // Deduct quota with limit validation
-            boolean quotaDeducted = planService.consumeQuota(null, requestedType.name());
-            if (!quotaDeducted) {
-                throw new IllegalStateException("All allowed limit already planned. Please delete from Reel Planner.");
-            }
+            planService.checkCapacity(requestedType, date, 1);
 
             // User specified what format they want to generate for this date (no pending tasks left)
             String chosenTopic;

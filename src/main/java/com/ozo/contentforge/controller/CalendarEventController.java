@@ -39,13 +39,16 @@ public class CalendarEventController {
     private final MasterSettingsService settingsService;
     private final AiProviderService aiProviderService;
     private final BrandProfileRepository brandRepository;
+    private final com.ozo.contentforge.service.StoryService storyService;
 
     public CalendarEventController(OccasionCalendarService calendarService,
                                    ContentPostService postService,
                                    PlanService planService,
                                    MasterSettingsService settingsService,
                                    AiProviderService aiProviderService,
-                                   BrandProfileRepository brandRepository) {
+                                   BrandProfileRepository brandRepository,
+                                   com.ozo.contentforge.service.StoryService storyService) {
+        this.storyService = storyService;
         this.calendarService = calendarService;
         this.postService = postService;
         this.planService = planService;
@@ -91,10 +94,8 @@ public class CalendarEventController {
             title = generateUniqueAiTopic(eventDate, themeBrief, contentType);
         }
 
-        boolean quotaConsumed = planService.consumeQuota(null, contentType.name());
-        if (!quotaConsumed) {
-            throw new IllegalStateException("All allowed limit already planned. Please delete from Reel Planner.");
-        }
+        int units = contentType == ContentType.STORY ? Math.max(1, slideCount) : 1;
+        planService.checkCapacity(contentType, eventDate, units);
 
         return ResponseEntity.ok(calendarService.createEvent(title, eventDate, recurrence, themeBrief, extraCount,
                 contentType, slideCount, language, mode, publishTime, replaceQuota));
@@ -131,8 +132,6 @@ public class CalendarEventController {
                         "error", "Cannot delete past scheduled events because slots cannot be freed for past dates"
                 ));
             }
-            String cType = event.getContentType() != null ? event.getContentType().name() : "REEL";
-            planService.releaseQuota(null, cType);
             calendarService.deleteEvent(id);
         }
         return ResponseEntity.noContent().build();
@@ -164,6 +163,7 @@ public class CalendarEventController {
             res.put("slides", postService.getSlidesForPost(post.getId()));
             res.put("mediaJobs", postService.getMediaJobsForPost(post.getId()));
             res.put("approvals", postService.getApprovalsForPost(post.getId()));
+            res.put("frames", storyService.frames(post.getId()));
         } else {
             res.put("hasPost", false);
         }

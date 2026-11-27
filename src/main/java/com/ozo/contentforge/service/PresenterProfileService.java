@@ -21,10 +21,14 @@ public class PresenterProfileService {
     private final StorageService storageService;
     private final AiProviderService aiProviderService;
 
+    private final ConsentGuard consentGuard;
+
     public PresenterProfileService(PresenterProfileRepository presenterRepository,
                                   VideoAvatarRepository videoAvatarRepository,
                                   StorageService storageService,
-                                  AiProviderService aiProviderService) {
+                                  AiProviderService aiProviderService,
+                                  ConsentGuard consentGuard) {
+        this.consentGuard = consentGuard;
         this.presenterRepository = presenterRepository;
         this.videoAvatarRepository = videoAvatarRepository;
         this.storageService = storageService;
@@ -52,6 +56,7 @@ public class PresenterProfileService {
         String resolvedAvatarId = avatarId;
 
         if (photoFile != null && !photoFile.isEmpty()) {
+            consentGuard.requireFace();
             GeneratedAssetEntity asset = storageService.storeUploadedFile(photoFile, AssetType.IMAGE, null, null);
             avatarImageUrl = asset.getStorageUrl();
 
@@ -89,7 +94,7 @@ public class PresenterProfileService {
                 .avatarId(resolvedAvatarId)
                 .avatarImageUrl(avatarImageUrl)
                 .voiceProvider(voiceProvider != null ? voiceProvider : "ELEVENLABS")
-                .voiceId(voiceId != null ? voiceId : "rRAzMEZ6U57ivzmuPBhL")
+                .voiceId(voiceId)
                 .consentReference(consentReference)
                 .active(true)
                 .isDefault(Boolean.TRUE.equals(isDefault))

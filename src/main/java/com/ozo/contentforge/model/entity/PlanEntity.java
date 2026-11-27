@@ -5,6 +5,10 @@ import lombok.*;
 
 import java.time.LocalDateTime;
 
+/**
+ * A package a brand buys: how much content it gets per month. Standard and Premium are fixed; a Custom brand starts
+ * from a plan and gets its own counts on its subscription.
+ */
 @Entity
 @Table(name = "cf_plans")
 @Getter
@@ -19,39 +23,48 @@ public class PlanEntity {
     private Long id;
 
     @Column(name = "name", nullable = false)
-    private String name; // e.g. "Basic Plan", "Standard Plan", "Premium Plan", "Corporate Plan"
+    private String name;
+
+    /** STANDARD, PREMIUM or CUSTOM */
+    @Column(name = "tier")
+    private String tier;
 
     @Column(name = "description", columnDefinition = "TEXT")
     private String description;
 
-    @Column(name = "billing_cycle", nullable = false)
-    private String billingCycle; // "MONTHLY" or "YEARLY"
+    @Column(name = "billing_cycle")
+    private String billingCycle;
 
     @Column(name = "price_inr")
     private Double priceInr;
 
-    @Column(name = "reels_quota", nullable = false)
-    private Integer reelsQuota; // e.g. 4
+    // ---- Monthly content counts ----
 
-    @Column(name = "event_reels_quota", nullable = false)
-    private Integer eventReelsQuota; // e.g. 2
+    @Column(name = "reels_quota")
+    private Integer avatarReelsQuota;
 
-    @Column(name = "event_posts_quota", nullable = false)
-    private Integer eventPostsQuota; // e.g. 4
+    @Column(name = "explainer_quota")
+    private Integer explainerQuota;
 
-    @Column(name = "carousel_quota", nullable = false)
-    private Integer carouselQuota; // e.g. 5
+    @Column(name = "carousel_quota")
+    private Integer carouselQuota;
 
-    @Column(name = "image_posts_quota", nullable = false)
-    private Integer imagePostsQuota; // e.g. 10
+    @Column(name = "image_posts_quota")
+    private Integer imagePostsQuota;
 
-    @Column(name = "premium_support")
-    private Boolean premiumSupport;
+    /** Story frames per month (one story is usually 2-4 frames). */
+    @Column(name = "story_frames_quota")
+    private Integer storyFramesQuota;
 
+    /** Of all videos, at least this many show the person's face. */
+    @Column(name = "min_face_videos")
+    private Integer minFaceVideos;
+
+    /** Included services shown on the plan, as a JSON array of strings. */
     @Column(name = "features_json", columnDefinition = "TEXT")
     private String featuresJson;
 
-    @Column(name = "active", nullable = false)
+    @Column(name = "active")
     private Boolean active;
 
     @Column(name = "created_at")
@@ -62,21 +75,14 @@ public class PlanEntity {
 
     @PrePersist
     public void onCreate() {
-        this.createdAt = LocalDateTime.now();
-        this.updatedAt = LocalDateTime.now();
-        if (this.active == null) this.active = true;
-        if (this.reelsQuota == null) this.reelsQuota = 4;
-        if (this.eventReelsQuota == null) this.eventReelsQuota = 2;
-        if (this.eventPostsQuota == null) this.eventPostsQuota = 4;
-        if (this.carouselQuota == null) this.carouselQuota = 5;
-        if (this.imagePostsQuota == null) this.imagePostsQuota = 10;
-        if (this.premiumSupport == null) this.premiumSupport = false;
-        if (this.billingCycle == null) this.billingCycle = "MONTHLY";
+        createdAt = LocalDateTime.now();
+        updatedAt = createdAt;
+        if (active == null) active = true;
+        if (billingCycle == null) billingCycle = "MONTHLY";
     }
 
     @PreUpdate
     public void onUpdate() {
-        this.updatedAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
     }
 }
-

@@ -4,6 +4,7 @@ import com.ozo.contentforge.model.entity.*;
 import com.ozo.contentforge.model.enums.*;
 import com.ozo.contentforge.service.ContentPostService;
 import com.ozo.contentforge.service.ReelEnhanceService;
+import com.ozo.contentforge.service.StoryService;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,8 +20,13 @@ public class ContentPostController {
 
     private final ContentPostService postService;
     private final ReelEnhanceService enhanceService;
+    private final StoryService storyService;
+    private final com.ozo.contentforge.service.PlanService planService;
 
-    public ContentPostController(ContentPostService postService, ReelEnhanceService enhanceService) {
+    public ContentPostController(ContentPostService postService, ReelEnhanceService enhanceService, StoryService storyService,
+                                 com.ozo.contentforge.service.PlanService planService) {
+        this.planService = planService;
+        this.storyService = storyService;
         this.enhanceService = enhanceService;
         this.postService = postService;
     }
@@ -42,6 +48,7 @@ public class ContentPostController {
         details.put("slides", postService.getSlidesForPost(id));
         details.put("mediaJobs", postService.getMediaJobsForPost(id));
         details.put("approvals", postService.getApprovalsForPost(id));
+        details.put("frames", storyService.frames(id));
 
         return ResponseEntity.ok(details);
     }
@@ -83,6 +90,8 @@ public class ContentPostController {
             AvatarEngine engine = AvatarEngine.valueOf((String) req.getOrDefault("avatarEngine", "AVATAR_IV"));
             int duration = req.containsKey("durationSeconds") ? ((Number) req.get("durationSeconds")).intValue() : 45;
 
+            // a story made here is drawn with 3 frames (StoryService default); every format counts against the plan
+            planService.checkCapacity(contentType, date, contentType == ContentType.STORY ? 3 : 1);
             ContentPostEntity created = postService.createAndPlanPost(date, null, null, contentType, topic, mode, engine, duration);
             return ResponseEntity.ok(created);
         } catch (Exception e) {
@@ -209,9 +218,31 @@ public class ContentPostController {
         return ResponseEntity.ok(postService.publishNow(id));
     }
 
+    /** Puts a post whose publish failed back in the queue. */
+    @PostMapping("/{id}/retry-publish")
+    public ResponseEntity<ContentPostEntity> retryPublish(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(postService.retryPublish(id));
+    }
+
+    // ---- Story frames ----
+
+    @GetMapping("/{id}/frames")
+    public List<StoryFrameEntity> frames(@PathVariable("id") Long id) {
+        return storyService.frames(id);
+    }
+
+    public record FrameUpdate(String type, String headline, String body, Map<String, Object> sticker, String backgroundUrl) {
+    }
+
+    @PutMapping("/{id}/frames/{frameNumber}")
+    public StoryFrameEntity updateFrame(@PathVariable("id") Long id, @PathVariable("frameNumber") int frameNumber,
+                                        @RequestBody FrameUpdate req) {
+        return storyService.updateFrame(id, frameNumber, req.type(), req.headline(), req.body(), req.sticker(), req.backgroundUrl());
+    }
+
     @PostMapping("/{id}/repost")
     public ResponseEntity<ContentPostEntity> repost(@PathVariable("id") Long id) {
-        return ResponseEntity.ok(postService.publishNow(id));
+        return ResponseEntity.ok(postService.repost(id));
     }
 
     @PutMapping("/{id}/slides/{slideNumber}")

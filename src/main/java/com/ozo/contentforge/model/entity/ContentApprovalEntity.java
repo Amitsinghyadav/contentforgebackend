@@ -1,5 +1,6 @@
 package com.ozo.contentforge.model.entity;
 
+import com.ozo.contentforge.tenancy.BrandOwnedEntity;
 import com.ozo.contentforge.model.enums.ApprovalDecision;
 import com.ozo.contentforge.model.enums.ApprovalType;
 import jakarta.persistence.*;
@@ -13,7 +14,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class ContentApprovalEntity {
+public class ContentApprovalEntity extends BrandOwnedEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

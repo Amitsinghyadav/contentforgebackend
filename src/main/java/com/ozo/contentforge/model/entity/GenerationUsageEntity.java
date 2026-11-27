@@ -1,5 +1,6 @@
 package com.ozo.contentforge.model.entity;
 
+import com.ozo.contentforge.tenancy.BrandOwnedEntity;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDateTime;
@@ -11,7 +12,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class GenerationUsageEntity {
+public class GenerationUsageEntity extends BrandOwnedEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

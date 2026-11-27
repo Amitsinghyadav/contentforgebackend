@@ -96,15 +96,6 @@ public class AiProviderService {
     @Value("${runway.model:gen4.5}")
     private String runwayModel;
 
-    @Value("${meta.instagram.graph.api.version:v21.0}")
-    private String metaGraphVersion;
-
-    @Value("${meta.instagram.graph.api.access-token:}")
-    private String metaAccessToken;
-
-    @Value("${meta.instagram.account.id:}")
-    private String metaAccountId;
-
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper;
     private final StorageService storageService;
@@ -215,6 +206,61 @@ public class AiProviderService {
             }
         }
         return list;
+    }
+
+    /**
+     * Writes the frames of one Instagram story: a short sequence that keeps followers engaged. Returns frames with
+     * type, headline, body and, for sticker frames, the sticker the team adds by hand.
+     */
+    public List<Map<String, Object>> generateStoryFrames(String topic, String industry, String brandTone, String audience,
+                                                         String language, String cta, int frameCount) {
+        if (!isRealKey(anthropicKey) && !isRealKey(openAiKey)) {
+            throw new IllegalStateException("No AI key is configured (anthropic.api.key or openai.api.key)");
+        }
+        int count = Math.max(1, Math.min(frameCount, 10));
+        String prompt = String.format("""
+                Write one Instagram story of exactly %d frames for a brand.
+                Topic: %s
+                Industry: %s
+                Audience: %s
+                Tone: %s
+                Language: %s (write the text in this language; Hinglish means Hindi in Roman letters mixed with English)
+                Brand call to action: %s
+
+                Goal: engage existing followers and start conversations. Frames are 9:16, read in 3-5 seconds each:
+                a headline of at most 8 words and a body of at most 22 words. Build a small arc: hook, value, interaction, action.
+                Use at most one interactive frame (POLL, QUIZ or QUESTION) and put it where it fits naturally.
+                Allowed types: TIP, QUOTE, BEHIND_THE_SCENES, SHARE_POST, ANNOUNCEMENT, OFFER, POLL, QUIZ, QUESTION, LINK.
+                For POLL give 2 short options; for QUIZ give 2-4 options and the index of the right one; for QUESTION give the
+                question-box prompt; for LINK give the link label. Leave the lower third of interactive frames free for the sticker.
+                Never make medical cure claims or promise results.
+
+                Return JSON: {"frames":[{"type":"TIP","headline":"...","body":"...",
+                "sticker":{"question":"...","options":["..."],"correctIndex":0,"label":"..."}}]}
+                Omit "sticker" for frames without one.
+                """, count, topic, industry, audience, brandTone, language, cta != null && !cta.isBlank() ? cta : "none");
+        try {
+            String content = callLlmText("You are a senior Instagram stories strategist. Reply with strict valid JSON only.",
+                    prompt, 1800, 0.8, true);
+            JsonNode root = objectMapper.readTree(stripMarkdownJsonFences(content));
+            List<Map<String, Object>> frames = new ArrayList<>();
+            for (JsonNode f : root.path("frames")) {
+                Map<String, Object> frame = new HashMap<>();
+                frame.put("type", f.path("type").asText("TIP"));
+                frame.put("headline", f.path("headline").asText(""));
+                frame.put("body", f.path("body").asText(""));
+                if (f.has("sticker") && !f.get("sticker").isNull()) {
+                    frame.put("sticker", objectMapper.convertValue(f.get("sticker"), Map.class));
+                }
+                frames.add(frame);
+            }
+            if (frames.isEmpty()) throw new IllegalStateException("The AI returned no story frames");
+            return frames.size() > count ? frames.subList(0, count) : frames;
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("Story writing failed: " + e.getMessage(), e);
+        }
     }
 
     private String callLlmText(String systemPrompt, String userPrompt, int maxTokens, double temperature, boolean jsonMode) throws Exception {
@@ -431,7 +477,7 @@ public class AiProviderService {
         String effectiveIndustry = (industry != null && !industry.isBlank()) ? industry : "Business & Lifestyle";
         String effectiveAudience = (targetAudience != null && !targetAudience.isBlank()) ? targetAudience : "Target customers and followers";
         String effectiveTone = (brandTone != null && !brandTone.isBlank()) ? brandTone : "Engaging, authoritative, relatable, and authentic";
-        String effectiveCtaText = (brandCtaText != null && !brandCtaText.isBlank()) ? brandCtaText : "Download OZO Health app";
+        String effectiveCtaText = (brandCtaText != null && !brandCtaText.isBlank()) ? brandCtaText : "Follow for more tips like this";
         int targetSlideCount = carouselSlideCount > 0 ? carouselSlideCount : 6;
         String effectiveAspectRatio = (videoAspectRatio != null && !videoAspectRatio.isBlank()) ? videoAspectRatio.trim() : "9:16";
         String ratioDescription = "1:1".equals(effectiveAspectRatio)
@@ -527,7 +573,7 @@ public class AiProviderService {
             ctaReelRules = String.format("""
                - End Call-To-Action (CTA) is ENABLED in settings.
                - Scene %d MUST be a dedicated Brand Call-To-Action (CTA) ending scene!
-               - In Scene %d "spokenText", the presenter MUST explicitly speak this Call-To-Action in conversational Hinglish: "%s" (e.g. "Abhi OZO Health app download karo aur daily preventive insights pao! Follow & share this reel!").
+               - In Scene %d "spokenText", the presenter MUST explicitly speak this Call-To-Action in conversational Hinglish: "%s" (said naturally, e.g. "Aise aur tips ke liye follow karo aur yeh reel share karo!").
                - The presenterScript MUST include this spoken CTA so ElevenLabs generates it in the voiceover audio track.
                - In Scene %d "visualPrompt", depict the presenter warmly smiling at the camera and pointing to the animated app download / follow badge on screen.
                """, totalScenes, totalScenes, effectiveCtaText, totalScenes);
@@ -987,9 +1033,11 @@ public class AiProviderService {
         int charCount = text != null ? text.length() : 300;
         double cost = charCount * 0.0003;
 
-        String effectiveVoiceId = (voiceId != null && !voiceId.isBlank() && !voiceId.startsWith("el_"))
-                ? voiceId
-                : "rRAzMEZ6U57ivzmuPBhL"; // Default Amit Singh Yadav cloned voice
+        // Never fall back to another person's cloned voice: each brand speaks only with its own (consented) voice
+        if (voiceId == null || voiceId.isBlank() || voiceId.startsWith("el_")) {
+            throw new IllegalStateException("This brand has no cloned voice yet. Add one in Voices first.");
+        }
+        String effectiveVoiceId = voiceId;
 
         if (isRealKey(elevenLabsKey)) {
             // Apply GPT voice direction pass: transforms raw spokenText into ElevenLabs-ready
@@ -997,10 +1045,6 @@ public class AiProviderService {
             String directedText = applyVoiceDirection(text, null);
             log.info("Voice direction applied. Original chars: {}, Directed chars: {}", text != null ? text.length() : 0, directedText.length());
             byte[] audioBytes = callElevenLabsTts(directedText, effectiveVoiceId);
-            if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
-                log.warn("ElevenLabs TTS failed for voice '{}'. Retrying with verified default voice 'rRAzMEZ6U57ivzmuPBhL' (Amit Singh Yadav)...", effectiveVoiceId);
-                audioBytes = callElevenLabsTts(directedText, "rRAzMEZ6U57ivzmuPBhL");
-            }
 
             if (audioBytes != null && audioBytes.length > 500) {
                 completeJob(job, cost);
@@ -1056,9 +1100,10 @@ public class AiProviderService {
         log.info("Generating 3 ElevenLabs tone samples for post {}...", postId);
         MediaJobEntity job = recordJob(postId, null, JobProvider.ELEVENLABS, "GENERATE_VOICE_SAMPLES");
 
-        String effectiveVoiceId = (voiceId != null && !voiceId.isBlank() && !voiceId.startsWith("el_"))
-                ? voiceId
-                : "rRAzMEZ6U57ivzmuPBhL";
+        if (voiceId == null || voiceId.isBlank() || voiceId.startsWith("el_")) {
+            throw new IllegalStateException("This brand has no cloned voice yet. Add one in Voices first.");
+        }
+        String effectiveVoiceId = voiceId;
 
         if (!isRealKey(elevenLabsKey)) {
             job.setStatus(JobStatus.FAILED);
@@ -1076,10 +1121,6 @@ public class AiProviderService {
             try {
                 String directedText = applyVoiceDirection(text, profile.directionGuidance());
                 byte[] audioBytes = callElevenLabsTts(directedText, effectiveVoiceId, profile.stability(), profile.similarity(), profile.style(), failureReasons);
-                if (audioBytes == null && !"rRAzMEZ6U57ivzmuPBhL".equals(effectiveVoiceId)) {
-                    log.warn("ElevenLabs TTS sample '{}' failed for voice '{}'. Retrying with default voice...", profile.id(), effectiveVoiceId);
-                    audioBytes = callElevenLabsTts(directedText, "rRAzMEZ6U57ivzmuPBhL", profile.stability(), profile.similarity(), profile.style(), failureReasons);
-                }
                 if (audioBytes == null || audioBytes.length <= 500) {
                     log.warn("ElevenLabs TTS sample '{}' returned empty/invalid audio for post {}", profile.id(), postId);
                     continue;
@@ -2895,159 +2936,6 @@ CTA: [excited] "Toh ABHI app download karo aur apni journey shuru karo - aaj se!
         }
     }
 
-    // =========================================================================
-    // 6. META INSTAGRAM & FACEBOOK GRAPH API PUBLISHING
-    // =========================================================================
-    private String getEffectiveMetaAccessToken() {
-        if (masterSettingsService != null) {
-            try {
-                Map<String, Object> s = masterSettingsService.getAllSettings();
-                String token = (String) s.get("facebookPageAccessToken");
-                if (token != null && !token.isBlank() && isRealKey(token)) {
-                    return token.trim();
-                }
-                token = (String) s.get("metaAccessToken");
-                if (token != null && !token.isBlank() && isRealKey(token)) {
-                    return token.trim();
-                }
-            } catch (Exception ignored) {}
-        }
-        return metaAccessToken;
-    }
-
-    private String getEffectiveInstagramAccountId() {
-        if (masterSettingsService != null) {
-            try {
-                Map<String, Object> s = masterSettingsService.getAllSettings();
-                String id = (String) s.get("instagramAccountId");
-                if (id != null && !id.isBlank() && isRealKey(id)) {
-                    return id.trim();
-                }
-            } catch (Exception ignored) {}
-        }
-        return metaAccountId;
-    }
-
-    public Map<String, String> publishToInstagram(Long postId, String videoUrl, String caption) {
-        return publishToInstagram(postId, videoUrl, null, caption);
-    }
-
-    public Map<String, String> publishToInstagram(Long postId, String videoUrl, String coverImageUrl, String caption) {
-        log.info("Publishing Reel to Instagram for post {}...", postId);
-        MediaJobEntity job = recordJob(postId, null, JobProvider.META, "PUBLISH_INSTAGRAM");
-
-        String containerId = "ig_container_" + System.currentTimeMillis();
-        String mediaId = "ig_media_" + System.currentTimeMillis();
-        String permalink = "https://instagram.com/reel/ozo_" + postId + "_" + UUID.randomUUID().toString().substring(0, 8);
-
-        String effectiveToken = getEffectiveMetaAccessToken();
-        String effectiveAccountId = getEffectiveInstagramAccountId();
-
-        if (isRealKey(effectiveToken) && isRealKey(effectiveAccountId)) {
-            try {
-                // 1. Create media container with on-demand presigned video URL
-                String externalVideoUrl = storageService.getPresignedUrl(videoUrl, Duration.ofHours(24));
-                String url = String.format("https://graph.facebook.com/%s/%s/media", metaGraphVersion, effectiveAccountId);
-                HttpHeaders headers = new HttpHeaders();
-                headers.setContentType(MediaType.APPLICATION_JSON);
-
-                Map<String, Object> body = new HashMap<>();
-                body.put("media_type", "REELS");
-                body.put("video_url", externalVideoUrl);
-                body.put("caption", caption != null ? caption : "");
-                body.put("share_to_feed", true);
-                body.put("access_token", effectiveToken);
-
-                if (coverImageUrl != null && !coverImageUrl.isBlank()) {
-                    String externalCoverUrl = storageService.getPresignedUrl(coverImageUrl, Duration.ofHours(24));
-                    body.put("cover_url", externalCoverUrl);
-                }
-
-                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-                ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
-                JsonNode json = objectMapper.readTree(response.getBody());
-                if (json.has("id")) {
-                    containerId = json.get("id").asText();
-                    log.info("Meta container created with ID: {}", containerId);
-
-                    // 2. Poll container status until FINISHED
-                    boolean isReady = pollMetaContainerReady(containerId, effectiveToken, 60);
-
-                    // 3. Publish container to Instagram
-                    if (isReady) {
-                        String publishUrl = String.format("https://graph.facebook.com/%s/%s/media_publish?creation_id=%s&access_token=%s",
-                                metaGraphVersion, effectiveAccountId, containerId, effectiveToken);
-                        ResponseEntity<String> pubResponse = restTemplate.postForEntity(publishUrl, null, String.class);
-                        JsonNode pubJson = objectMapper.readTree(pubResponse.getBody());
-                        if (pubJson.has("id")) {
-                            mediaId = pubJson.get("id").asText();
-                            log.info("Meta Reel successfully published! Media ID: {}", mediaId);
-
-                            // 4. Fetch live permalink
-                            try {
-                                String permalinkUrl = String.format("https://graph.facebook.com/%s/%s?fields=permalink&access_token=%s",
-                                        metaGraphVersion, mediaId, effectiveToken);
-                                ResponseEntity<String> permResponse = restTemplate.getForEntity(permalinkUrl, String.class);
-                                JsonNode permJson = objectMapper.readTree(permResponse.getBody());
-                                if (permJson.has("permalink")) {
-                                    permalink = permJson.get("permalink").asText();
-                                }
-                            } catch (Exception permEx) {
-                                log.debug("Could not fetch live permalink: {}", permEx.getMessage());
-                            }
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Meta publishing error: {}", e.getMessage());
-            }
-        }
-
-        completeJob(job, 0.0);
-        return Map.of("containerId", containerId, "mediaId", mediaId, "permalink", permalink);
-    }
-
-    public Map<String, String> publishToFacebookPage(Long postId, String mediaUrl, String caption, boolean isVideo) {
-        log.info("Publishing to Facebook Page for post {} (isVideo={})...", postId, isVideo);
-        MediaJobEntity job = recordJob(postId, null, JobProvider.META, "PUBLISH_FACEBOOK_PAGE");
-        Map<String, String> result = metaIntegrationService.publishToFacebookPage(postId, mediaUrl, caption, isVideo);
-        completeJob(job, 0.0);
-        return result;
-    }
-
-    private boolean pollMetaContainerReady(String containerId, int maxWaitSeconds) {
-        return pollMetaContainerReady(containerId, getEffectiveMetaAccessToken(), maxWaitSeconds);
-    }
-
-    private boolean pollMetaContainerReady(String containerId, String token, int maxWaitSeconds) {
-        long startTime = System.currentTimeMillis();
-        long maxWaitMillis = maxWaitSeconds * 1000L;
-        while (System.currentTimeMillis() - startTime < maxWaitMillis) {
-            try {
-                String statusUrl = String.format("https://graph.facebook.com/%s/%s?fields=status_code,status&access_token=%s",
-                        metaGraphVersion, containerId, token);
-                ResponseEntity<String> response = restTemplate.getForEntity(statusUrl, String.class);
-                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                    JsonNode root = objectMapper.readTree(response.getBody());
-                    String statusCode = root.path("status_code").asText();
-                    if ("FINISHED".equalsIgnoreCase(statusCode)) {
-                        log.info("Meta container {} video ingestion finished. Ready for publishing.", containerId);
-                        return true;
-                    } else if ("ERROR".equalsIgnoreCase(statusCode)) {
-                        log.error("Meta container {} encountered ingestion error", containerId);
-                        return false;
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("Meta status poll notice: {}", e.getMessage());
-            }
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException ignored) {}
-        }
-        log.warn("Meta container {} status polling timed out after {}s", containerId, maxWaitSeconds);
-        return false;
-    }
 
     private MediaJobEntity recordJob(Long postId, Long sceneId, JobProvider provider, String operation) {
         MediaJobEntity entity = MediaJobEntity.builder()

@@ -31,9 +31,8 @@ public class MasterSettingsController {
     }
 
     @PutMapping
-    public ResponseEntity<Map<String, Object>> updateSettings(@RequestBody Map<String, Object> newSettings,
-                                                              @RequestHeader(value = "X-Actor-Id", required = false) String actorId) {
-        return ResponseEntity.ok(settingsService.updateSettings(newSettings, actorId));
+    public ResponseEntity<Map<String, Object>> updateSettings(@RequestBody Map<String, Object> newSettings) {
+        return ResponseEntity.ok(settingsService.updateEditableSettings(newSettings));
     }
 
     @PostMapping(value = "/logo", consumes = {MediaType.MULTIPART_FORM_DATA_VALUE})
@@ -41,7 +40,7 @@ public class MasterSettingsController {
         GeneratedAssetEntity asset = storageService.storeUploadedFile(file, AssetType.LOGO, null, null);
         Map<String, Object> current = settingsService.getAllSettings();
         current.put("brandLogoUrl", asset.getStorageUrl());
-        settingsService.updateSettings(current, "admin");
+        settingsService.updateSettings(current);
         return ResponseEntity.ok(Map.of(
                 "brandLogoUrl", asset.getStorageUrl(),
                 "assetId", asset.getId(),
@@ -53,7 +52,7 @@ public class MasterSettingsController {
     public ResponseEntity<Map<String, Object>> removeLogo() {
         Map<String, Object> current = settingsService.getAllSettings();
         current.remove("brandLogoUrl");
-        settingsService.updateSettings(current, "admin");
+        settingsService.updateSettings(current);
         return ResponseEntity.ok(Map.of("message", "Brand logo removed"));
     }
 }

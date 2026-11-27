@@ -39,8 +39,8 @@ public class MetaIntegrationService {
         if (code == null || code.isBlank()) {
             throw new IllegalArgumentException("OAuth code is required");
         }
-        if (appId == null || appId.isBlank()) {
-            return simulateOAuthLogin();
+        if (appId == null || appId.isBlank() || appSecret == null || appSecret.isBlank()) {
+            throw new IllegalStateException("The Meta app id and secret aren't configured on the server (meta.app.id, meta.app.secret)");
         }
 
         try {
@@ -51,8 +51,8 @@ public class MetaIntegrationService {
             ResponseEntity<String> response = restTemplate.getForEntity(tokenUrl, String.class);
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                 JsonNode json = objectMapper.readTree(response.getBody());
-                String accessToken = json.path("access_token").asText();
-                return inspectToken(accessToken);
+                String shortLived = json.path("access_token").asText();
+                return inspectToken(exchangeForLongLivedToken(shortLived, appId.trim(), appSecret.trim()));
             }
         } catch (Exception e) {
             log.error("Failed to exchange Meta OAuth code: {}", e.getMessage());
@@ -62,10 +62,52 @@ public class MetaIntegrationService {
     }
 
     /**
-     * Simulates 1-click OAuth login for development / preview environments without manual token entry.
+     * A user token from the OAuth code lasts about an hour; the long-lived one lasts about 60 days, and Page tokens
+     * read with it don't expire, so a brand stays connected.
      */
-    public Map<String, Object> simulateOAuthLogin() {
-        return buildMockInspection("oauth_token_verified_" + UUID.randomUUID().toString().substring(0, 8));
+    private String exchangeForLongLivedToken(String shortLivedToken, String appId, String appSecret) {
+        try {
+            String url = String.format(
+                    "https://graph.facebook.com/%s/oauth/access_token?grant_type=fb_exchange_token&client_id={appId}&client_secret={secret}&fb_exchange_token={token}",
+                    DEFAULT_GRAPH_VERSION);
+            String body = restTemplate.getForObject(url, String.class, Map.of("appId", appId, "secret", appSecret, "token", shortLivedToken));
+            String longLived = objectMapper.readTree(body).path("access_token").asText(null);
+            return longLived != null ? longLived : shortLivedToken;
+        } catch (Exception e) {
+            log.warn("Could not get a long-lived Meta token, using the short-lived one: {}", e.getMessage());
+            return shortLivedToken;
+        }
+    }
+
+    /**
+     * Checks the brand's stored connection still works and records the result in its settings
+     * (metaTokenStatus VALID or INVALID), so the dashboard can warn the team before a publish fails.
+     */
+    public Map<String, Object> checkConnectionHealth() {
+        Map<String, Object> s = masterSettingsService.getAllSettings();
+        String igId = (String) s.get("instagramAccountId");
+        String token = (String) s.get("facebookPageAccessToken");
+        if (!Boolean.TRUE.equals(s.get("metaConnected")) || igId == null || igId.isBlank() || token == null || token.isBlank()) {
+            return getConnectionStatus();
+        }
+        String status;
+        String error = "";
+        try {
+            restTemplate.getForObject(String.format("https://graph.facebook.com/%s/%s?fields=username&access_token={token}",
+                    DEFAULT_GRAPH_VERSION, igId), String.class, Map.of("token", token));
+            status = "VALID";
+        } catch (org.springframework.web.client.HttpStatusCodeException e) {
+            status = e.getStatusCode().is4xxClientError() ? "INVALID" : "UNKNOWN";
+            error = e.getResponseBodyAsString();
+        } catch (Exception e) {
+            status = "UNKNOWN"; // network trouble says nothing about the token
+            error = e.getMessage();
+        }
+        s.put("metaTokenStatus", status);
+        s.put("metaTokenCheckedAt", java.time.LocalDateTime.now().toString());
+        s.put("metaTokenError", error != null && error.length() > 500 ? error.substring(0, 500) : error);
+        masterSettingsService.updateSettings(s);
+        return getConnectionStatus();
     }
 
     /**
@@ -93,10 +135,6 @@ public class MetaIntegrationService {
             }
         } catch (Exception e) {
             log.warn("Meta /me lookup warning: {}", e.getMessage());
-            // Fallback for simulation / mock testing if token is mock
-            if (cleanToken.startsWith("mock_") || cleanToken.startsWith("demo_")) {
-                return buildMockInspection(cleanToken);
-            }
             throw new RuntimeException("Failed to validate Meta access token: " + e.getMessage(), e);
         }
 
@@ -198,11 +236,14 @@ public class MetaIntegrationService {
         current.put("instagramAccountId", instagramAccountId != null ? instagramAccountId.trim() : "");
         current.put("instagramUsername", instagramUsername != null ? instagramUsername.trim() : "");
         current.put("crossPostToFacebook", true);
+        current.put("metaTokenStatus", "VALID");
+        current.put("metaTokenError", "");
+        current.put("metaTokenCheckedAt", java.time.LocalDateTime.now().toString());
         if (metaAppId != null && !metaAppId.isBlank()) {
             current.put("metaAppId", metaAppId.trim());
         }
 
-        masterSettingsService.updateSettings(current, "admin");
+        masterSettingsService.updateSettings(current);
         log.info("Meta account connected successfully: Page '{}' ({}), Instagram '{}' ({})",
                 pageName, pageId, instagramUsername, instagramAccountId);
 
@@ -221,8 +262,10 @@ public class MetaIntegrationService {
         current.put("facebookPageAccessToken", "");
         current.put("instagramAccountId", "");
         current.put("instagramUsername", "");
+        current.put("metaTokenStatus", "");
+        current.put("metaTokenError", "");
 
-        masterSettingsService.updateSettings(current, "admin");
+        masterSettingsService.updateSettings(current);
         log.info("Meta account disconnected.");
         return getConnectionStatus();
     }
@@ -252,108 +295,48 @@ public class MetaIntegrationService {
         status.put("instagramUsername", igUser != null ? igUser : "");
         status.put("crossPostToFacebook", crossPost);
         status.put("metaAppId", metaAppId != null ? metaAppId : "");
-        status.put("hasValidToken", hasPageToken);
+        status.put("hasValidToken", hasPageToken && !"INVALID".equals(s.get("metaTokenStatus")));
+        status.put("tokenStatus", s.getOrDefault("metaTokenStatus", ""));
+        status.put("tokenCheckedAt", s.getOrDefault("metaTokenCheckedAt", ""));
         return status;
     }
 
     /**
      * Cross-posts Reel / Video or Photo to the connected Facebook Page.
      */
+    /**
+     * Cross-posts to the brand's Facebook Page. Returns null when no Page is connected or cross-posting is off;
+     * throws when Facebook refuses it (the caller logs it, Instagram publishing is not affected).
+     */
     public Map<String, String> publishToFacebookPage(Long postId, String mediaUrl, String caption, boolean isVideo) {
         Map<String, Object> settings = masterSettingsService.getAllSettings();
         String pageId = (String) settings.get("facebookPageId");
         String pageAccessToken = (String) settings.get("facebookPageAccessToken");
-
-        log.info("Cross-posting to Facebook Page {} for post {} (isVideo={})...", pageId, postId, isVideo);
-
-        String fbPostId = "fb_post_" + System.currentTimeMillis();
-        String permalink = String.format("https://facebook.com/%s/posts/%s",
-                pageId != null && !pageId.isBlank() ? pageId : "ozohealth", postId);
-
-        if (pageId != null && !pageId.isBlank() && pageAccessToken != null && !pageAccessToken.isBlank() && !pageAccessToken.startsWith("mock_")) {
-            try {
-                String externalUrl = storageService.getPresignedUrl(mediaUrl, Duration.ofHours(24));
-
-                if (isVideo) {
-                    // Publish video / Reel to Facebook Page: POST /{page-id}/videos
-                    String postUrl = String.format("https://graph.facebook.com/%s/%s/videos", DEFAULT_GRAPH_VERSION, pageId);
-
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-
-                    MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-                    body.add("file_url", externalUrl);
-                    body.add("description", caption != null ? caption : "");
-                    body.add("published", "true");
-                    body.add("access_token", pageAccessToken);
-
-                    HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-                    ResponseEntity<String> response = restTemplate.postForEntity(postUrl, request, String.class);
-
-                    if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                        JsonNode json = objectMapper.readTree(response.getBody());
-                        if (json.has("id")) {
-                            fbPostId = json.get("id").asText();
-                            permalink = String.format("https://facebook.com/%s/videos/%s", pageId, fbPostId);
-                            log.info("Facebook Page video Reel published successfully! FB Video ID: {}", fbPostId);
-                        }
-                    }
-                } else {
-                    // Publish photo to Facebook Page: POST /{page-id}/photos
-                    String postUrl = String.format("https://graph.facebook.com/%s/%s/photos", DEFAULT_GRAPH_VERSION, pageId);
-
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-
-                    MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-                    body.add("url", externalUrl);
-                    body.add("caption", caption != null ? caption : "");
-                    body.add("published", "true");
-                    body.add("access_token", pageAccessToken);
-
-                    HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(body, headers);
-                    ResponseEntity<String> response = restTemplate.postForEntity(postUrl, request, String.class);
-
-                    if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                        JsonNode json = objectMapper.readTree(response.getBody());
-                        if (json.has("post_id")) {
-                            fbPostId = json.get("post_id").asText();
-                        } else if (json.has("id")) {
-                            fbPostId = json.get("id").asText();
-                        }
-                        permalink = String.format("https://facebook.com/%s", fbPostId);
-                        log.info("Facebook Page photo published successfully! FB Post ID: {}", fbPostId);
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("Facebook cross-posting encountered warning: {}", e.getMessage());
-            }
-        } else {
-            log.info("Using simulated Facebook publishing (mock/offline mode).");
+        boolean crossPost = !Boolean.FALSE.equals(settings.get("crossPostToFacebook"));
+        if (!crossPost || pageId == null || pageId.isBlank() || pageAccessToken == null || pageAccessToken.isBlank()) {
+            return null;
         }
 
-        return Map.of("postId", fbPostId, "permalink", permalink);
-    }
+        String externalUrl = storageService.getPresignedUrl(mediaUrl, Duration.ofHours(24));
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+        body.add(isVideo ? "file_url" : "url", externalUrl);
+        body.add(isVideo ? "description" : "caption", caption != null ? caption : "");
+        body.add("published", "true");
+        body.add("access_token", pageAccessToken);
+        String postUrl = String.format("https://graph.facebook.com/%s/%s/%s", DEFAULT_GRAPH_VERSION, pageId, isVideo ? "videos" : "photos");
 
-    private Map<String, Object> buildMockInspection(String token) {
-        Map<String, Object> pageData = new HashMap<>();
-        pageData.put("pageId", "104928571938472");
-        pageData.put("pageName", "OZO Health Official");
-        pageData.put("category", "Medical & Health");
-        pageData.put("pageAccessToken", token);
-
-        Map<String, Object> igData = new HashMap<>();
-        igData.put("instagramAccountId", "17841459201948301");
-        igData.put("instagramUsername", "ozohealth");
-        igData.put("name", "OZO Health");
-        pageData.put("instagramAccount", igData);
-
-        Map<String, Object> res = new HashMap<>();
-        res.put("userId", "102847192847120");
-        res.put("userName", "OZO Administrator");
-        res.put("pages", List.of(pageData));
-        res.put("pagesCount", 1);
-        return res;
+        try {
+            ResponseEntity<String> response = restTemplate.postForEntity(postUrl, new HttpEntity<>(body, headers), String.class);
+            JsonNode json = objectMapper.readTree(response.getBody() != null ? response.getBody() : "{}");
+            String id = json.hasNonNull("post_id") ? json.get("post_id").asText() : json.path("id").asText(null);
+            if (id == null) throw new IllegalStateException("Facebook didn't return a post id");
+            String permalink = isVideo ? String.format("https://facebook.com/%s/videos/%s", pageId, id) : "https://facebook.com/" + id;
+            log.info("Cross-posted post {} to Facebook Page {} ({})", postId, pageId, id);
+            return Map.of("postId", id, "permalink", permalink);
+        } catch (Exception e) {
+            throw new IllegalStateException("Facebook cross-post failed: " + e.getMessage(), e);
+        }
     }
 }
-

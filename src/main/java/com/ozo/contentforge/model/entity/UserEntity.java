@@ -1,5 +1,6 @@
 package com.ozo.contentforge.model.entity;
 
+import com.ozo.contentforge.security.UserRole;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -25,13 +26,13 @@ public class UserEntity {
     private String passwordHash;
 
     @Column(name = "role", nullable = false)
-    private String role; // "ADMIN" or "BUSINESS"
+    private String role; // UserRole: ADMIN or TEAM_MEMBER
 
     @Column(name = "admin_name")
-    private String adminName; // Contact / Admin Person Name
+    private String adminName; // the person's display name
 
-    @Column(name = "organization_name", nullable = false)
-    private String organizationName; // Business / Organization Name
+    @Column(name = "organization_name")
+    private String organizationName; // legacy: client logins are gone, brands hold business details
 
     @Column(name = "registration_no")
     private String registrationNo; // Business Reg / CIN
@@ -56,7 +57,7 @@ public class UserEntity {
         this.createdAt = LocalDateTime.now();
         this.updatedAt = LocalDateTime.now();
         if (this.active == null) this.active = true;
-        if (this.role == null) this.role = "BUSINESS";
+        if (this.role == null) this.role = UserRole.TEAM_MEMBER;
     }
 
     @PreUpdate

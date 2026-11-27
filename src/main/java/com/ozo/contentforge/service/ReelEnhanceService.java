@@ -21,7 +21,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * "Enhance": turns a reel's basic FFmpeg video into the full edit made by the render service (AI-directed motion
+ * "Enhance": turns a reel's basic FFmpeg video into the full edit made by the render service (Claude-written motion
  * graphics, styled captions, logo outro, sound design).
  *
  * The basic reel always exists first and stays if enhancing fails. On success the enhanced video becomes the reel's

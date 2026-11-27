@@ -13,7 +13,17 @@ public class MetaIntegrationController {
 
     private final MetaIntegrationService metaIntegrationService;
 
-    public MetaIntegrationController(MetaIntegrationService metaIntegrationService) {
+    @org.springframework.beans.factory.annotation.Value("${meta.app.secret:}")
+    private String metaAppSecret;
+
+    @org.springframework.beans.factory.annotation.Value("${meta.app.id:}")
+    private String metaAppId;
+
+    private final com.ozo.contentforge.service.MasterSettingsService settingsService;
+
+    public MetaIntegrationController(MetaIntegrationService metaIntegrationService,
+                                     com.ozo.contentforge.service.MasterSettingsService settingsService) {
+        this.settingsService = settingsService;
         this.metaIntegrationService = metaIntegrationService;
     }
 
@@ -71,8 +81,10 @@ public class MetaIntegrationController {
     public ResponseEntity<Map<String, Object>> exchangeOAuthCode(@RequestBody Map<String, String> request) {
         String code = request.get("code");
         String redirectUri = request.get("redirectUri");
-        String appId = request.get("appId");
-        String appSecret = request.get("appSecret");
+        String appId = request.get("appId") != null && !request.get("appId").isBlank() ? request.get("appId") : metaAppId;
+        // the app secret is read on the server (property, or the value saved in Settings), never sent by the browser
+        String appSecret = metaAppSecret != null && !metaAppSecret.isBlank() ? metaAppSecret
+                : (String) settingsService.getAllSettings().get("metaAppSecret");
         try {
             Map<String, Object> result = metaIntegrationService.exchangeOAuthCode(code, redirectUri, appId, appSecret);
             return ResponseEntity.ok(result);
@@ -81,12 +93,9 @@ public class MetaIntegrationController {
         }
     }
 
-    /**
-     * 1-Click OAuth simulation for instant connection without token entry.
-     */
-    @PostMapping("/oauth/simulate")
-    public ResponseEntity<Map<String, Object>> simulateOAuth() {
-        return ResponseEntity.ok(metaIntegrationService.simulateOAuthLogin());
+    /** Checks the brand's Instagram connection still works. */
+    @PostMapping("/health-check")
+    public ResponseEntity<Map<String, Object>> healthCheck() {
+        return ResponseEntity.ok(metaIntegrationService.checkConnectionHealth());
     }
 }
-

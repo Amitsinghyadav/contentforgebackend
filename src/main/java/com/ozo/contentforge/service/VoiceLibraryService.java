@@ -19,9 +19,11 @@ public class VoiceLibraryService {
     private final VoiceLibraryRepository voiceRepository;
     private final StorageService storageService;
     private final AiProviderService aiProviderService;
+    private final ConsentGuard consentGuard;
 
     public VoiceLibraryService(VoiceLibraryRepository voiceRepository, StorageService storageService,
-                               AiProviderService aiProviderService) {
+                               AiProviderService aiProviderService, ConsentGuard consentGuard) {
+        this.consentGuard = consentGuard;
         this.voiceRepository = voiceRepository;
         this.storageService = storageService;
         this.aiProviderService = aiProviderService;
@@ -63,6 +65,7 @@ public class VoiceLibraryService {
         }
 
         if (audioFile != null && !audioFile.isEmpty()) {
+            consentGuard.requireVoice();
             GeneratedAssetEntity asset = storageService.storeUploadedFile(audioFile, AssetType.AUDIO, null, null);
             sampleAudioUrl = asset.getStorageUrl();
 
@@ -81,7 +84,7 @@ public class VoiceLibraryService {
         }
 
         if (resolvedVoiceId == null || resolvedVoiceId.isBlank()) {
-            resolvedVoiceId = "rRAzMEZ6U57ivzmuPBhL"; // Default Amit Singh Yadav cloned voice
+            throw new IllegalArgumentException("Upload a voice sample to clone, or enter the ElevenLabs voice id");
         }
 
         if (Boolean.TRUE.equals(isDefault)) {

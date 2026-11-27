@@ -15,5 +15,9 @@ public enum PostStatus {
     PUBLISHING,
     PUBLISHED,
     FAILED,
-    CANCELLED
+    CANCELLED,
+    /** publishing failed after all retries; the error is in publishError */
+    PUBLISH_FAILED,
+    /** a story whose frames all need stickers: the team posts them by hand */
+    AWAITING_MANUAL_POST
 }

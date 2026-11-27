@@ -26,8 +26,8 @@ import java.time.LocalDateTime;
 import java.util.*;
 
 /**
- * Client for contentforgerender, the Remotion render service that turns the HeyGen avatar video into a branded reel
- * with AI-directed motion graphics, captions and sound design.
+ * Client for contentforgerender, the Remotion render service that turns the HeyGen avatar video into a branded reel:
+ * Claude writes each reel's own motion graphics, captions and sound design.
  *
  * Flow: POST /api/jobs (video URL + script + brand) -> poll GET /api/jobs/{id} -> download /jobs/{id}/final.mp4 -> S3.
  * Used by ReelEnhanceService after the basic FFmpeg reel exists; a failure leaves the basic reel in place.
@@ -46,9 +46,6 @@ public class RenderServiceClient {
 
     @Value("${render.service.key:}")
     private String serviceKey;
-
-    @Value("${render.service.style:clean-brand}")
-    private String style;
 
     @Value("${render.service.timeout-minutes:25}")
     private int timeoutMinutes;
@@ -152,9 +149,11 @@ public class RenderServiceClient {
         MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
         // the render service downloads these itself, so S3 objects get a short-lived presigned link
         form.add("videoUrl", storageService.getPresignedUrl(avatarVideoUrl, Duration.ofHours(2)));
-        form.add("style", firstNonBlank(str(settings.get("reelStyle")), style));
-        form.add("layout", "vertical"); // HeyGen renders 9:16
         form.add("captions", String.valueOf(captions));
+        // "Caption language and script" setting: Hindi = Devanagari captions; Hinglish / English = Roman letters
+        String captionLanguage = firstNonBlank(str(settings.get("captionLanguage")), "Hinglish");
+        form.add("captionScript", "Hindi".equalsIgnoreCase(captionLanguage) ? "native" : "roman");
+        form.add("language", "English".equalsIgnoreCase(captionLanguage) ? "en" : "hi"); // spoken language for Whisper
         form.add("brandName", firstNonBlank(str(settings.get("brandName")), brand != null ? brand.getBrandName() : null, "My Brand"));
         if (primary != null) form.add("primary", primary);
         if (secondary != null) form.add("secondary", secondary);
@@ -166,17 +165,17 @@ public class RenderServiceClient {
         if (logoUrl != null) form.add("logoUrl", storageService.getPresignedUrl(logoUrl, Duration.ofHours(2)));
         if (spokenScript != null && !spokenScript.isBlank()) form.add("script", spokenScript);
 
-        // the director treats notes as requirements: the brand's call to action and website must appear
+        // brand contact details: the editor shows them when the speaker mentions them (e.g. a call or booking ask)
         String cta = firstNonBlank(str(settings.get("cta")), brand != null ? brand.getCta() : null);
         String website = firstNonBlank(str(settings.get("website")), brand != null ? brand.getWebsite() : null);
         String phone = firstNonBlank(str(settings.get("brandPhone")));
-        StringBuilder notes = new StringBuilder();
-        if (cta != null) notes.append("Call to action: ").append(cta).append(". ");
-        if (phone != null) notes.append("Phone number: ").append(phone).append(" (show it large when the speaker asks viewers to call or book). ");
-        if (website != null) notes.append("Website: ").append(website).append(". ");
-        if (notes.length() > 0) form.add("notes", notes.substring(0, Math.min(notes.length(), 500)).trim());
+        StringBuilder info = new StringBuilder();
+        if (cta != null) info.append("Call to action: ").append(cta).append(". ");
+        if (phone != null) info.append("Phone number: ").append(phone).append(". ");
+        if (website != null) info.append("Website: ").append(website).append(". ");
+        if (info.length() > 0) form.add("brandInfo", info.substring(0, Math.min(info.length(), 500)).trim());
 
-        // Runway B-roll clips, described by their prompt so the director can place them
+        // Runway B-roll clips, described by their prompt so the editor can place them
         List<String> descriptions = new ArrayList<>();
         int n = 0;
         for (ContentSceneEntity scene : brollScenes) {
@@ -205,6 +204,41 @@ public class RenderServiceClient {
         JsonNode body = objectMapper.readTree(res.getBody());
         if (!body.hasNonNull("id")) throw new IllegalStateException("Render service did not return a job id: " + res.getBody());
         return body.get("id").asText();
+    }
+
+    /**
+     * Renders one 1080x1920 story frame in the brand's style and returns the PNG. {@code frame} carries type,
+     * headline, body, sticker (shown as a placeholder area), backgroundUrl and the brand fields.
+     */
+    public byte[] renderStoryFrame(Map<String, Object> frame) {
+        HttpHeaders headers = authHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setAccept(List.of(MediaType.IMAGE_PNG));
+        try {
+            byte[] png = restTemplate.exchange(baseUrl + "/api/stills/story", HttpMethod.POST, new HttpEntity<>(frame, headers), byte[].class).getBody();
+            if (png == null || png.length == 0) throw new IllegalStateException("The render service returned an empty image");
+            return png;
+        } catch (ResourceAccessException e) {
+            throw new IllegalStateException("The render service isn't reachable at " + baseUrl + " (start it with npm start in contentforgerender)");
+        } catch (org.springframework.web.client.HttpStatusCodeException e) {
+            throw new IllegalStateException("The render service couldn't draw the story frame: " + e.getResponseBodyAsString());
+        }
+    }
+
+    /** The brand fields every render needs: name, colours, handle and a downloadable logo link. */
+    public Map<String, Object> brandStyle(Map<String, Object> settings) {
+        BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
+        List<String> profileColors = brandColors(brand);
+        Map<String, Object> style = new HashMap<>();
+        style.put("brandName", firstNonBlank(str(settings.get("brandName")), brand != null ? brand.getBrandName() : null, ""));
+        style.put("primary", firstNonBlank(hex(settings.get("brandPrimaryColor")), profileColors.size() > 0 ? profileColors.get(0) : null, "#0074BC"));
+        style.put("secondary", firstNonBlank(hex(settings.get("brandSecondaryColor")), profileColors.size() > 1 ? profileColors.get(1) : null, "#2BB673"));
+        style.put("textColor", firstNonBlank(hex(settings.get("brandTextColor")), profileColors.size() > 2 ? profileColors.get(2) : null, "#231F20"));
+        String handle = firstNonBlank(str(settings.get("brandInstagramHandle")), str(settings.get("instagramUsername")));
+        if (handle != null) style.put("handle", "@" + handle.replaceFirst("^@", ""));
+        String logoUrl = firstNonBlank(str(settings.get("brandLogoUrl")), brand != null ? brand.getLogoUrl() : null);
+        if (logoUrl != null) style.put("logoUrl", storageService.getPresignedUrl(logoUrl, Duration.ofHours(1)));
+        return style;
     }
 
     /** Polls every 15 s. Returns null when the job is done, otherwise why it failed. Each new step is shown in the tasks log. */
@@ -241,8 +275,11 @@ public class RenderServiceClient {
 
     /** Turns the render service's error into something a reviewer can act on. */
     private static String friendly(String error) {
-        if (error.contains("credits") || error.contains("insufficient_quota")) return "OpenAI has no credits left for the AI director (add credits, then enhance again)";
-        if (error.contains("401") && error.toLowerCase().contains("api key")) return "The render service's OpenAI key is invalid";
+        String e = error.toLowerCase();
+        if (e.contains("credit balance") || e.contains("billing")) return "The render service's Anthropic account has no credits left (add credits, then enhance again)";
+        if (e.contains("authentication_error") || e.contains("invalid x-api-key") || (e.contains("401") && e.contains("api key")))
+            return "The render service's Anthropic key is invalid (check ANTHROPIC_API_KEY in contentforgerender/.env)";
+        if (e.contains("overloaded") || e.contains("529") || e.contains("rate_limit")) return "Claude was busy or rate-limited (enhance again in a few minutes)";
         return "The render service failed: " + (error.length() > 300 ? error.substring(0, 300) + "…" : error);
     }
 

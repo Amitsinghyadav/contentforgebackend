@@ -6,5 +6,7 @@ public enum AssetType {
     VIDEO,
     SUBTITLE,
     THUMBNAIL,
-    LOGO
+    LOGO,
+    /** signed documents, e.g. a brand's consent form */
+    DOCUMENT
 }

@@ -342,6 +342,7 @@ public class StorageService {
                 case AUDIO -> ".mp3";
                 case VIDEO -> ".mp4";
                 case SUBTITLE -> ".vtt";
+                case DOCUMENT -> ".pdf";
             };
         }
 
@@ -351,6 +352,7 @@ public class StorageService {
             case AUDIO -> "voices";
             case VIDEO -> "renders";
             case SUBTITLE -> "subtitles";
+            case DOCUMENT -> "documents";
         };
 
         String s3Key = String.format("media/%s/%s%s", folder, UUID.randomUUID(), extension);
@@ -388,6 +390,7 @@ public class StorageService {
             case AUDIO -> "audio";
             case VIDEO -> "videos";
             case SUBTITLE -> "subtitles";
+            case DOCUMENT -> "documents";
         };
 
         String s3Key = String.format("media/%s/%s%s", folder, UUID.randomUUID(), extension);

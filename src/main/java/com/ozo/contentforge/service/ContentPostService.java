@@ -45,6 +45,15 @@ public class ContentPostService {
     private final ObjectMapper objectMapper;
     private final ReelEnhanceService enhanceService;
 
+    /** Runs slow work on another thread for the same brand as the caller. */
+    private final com.ozo.contentforge.service.publishing.PublishingService publishingService;
+    private final ConsentGuard consentGuard;
+    private final StoryService storyService;
+
+    private static java.util.concurrent.CompletableFuture<Void> runInBackground(Runnable work) {
+        return java.util.concurrent.CompletableFuture.runAsync(com.ozo.contentforge.tenancy.BrandContext.wrap(work));
+    }
+
     public ContentPostService(ContentPostRepository postRepository,
                               ContentSceneRepository sceneRepository,
                               CarouselSlideRepository slideRepository,
@@ -61,7 +70,13 @@ public class ContentPostService {
                               AiProviderService aiProviderService,
                               StorageService storageService,
                               ObjectMapper objectMapper,
-                              ReelEnhanceService enhanceService) {
+                              ReelEnhanceService enhanceService,
+                              com.ozo.contentforge.service.publishing.PublishingService publishingService,
+                              ConsentGuard consentGuard,
+                              StoryService storyService) {
+        this.publishingService = publishingService;
+        this.consentGuard = consentGuard;
+        this.storyService = storyService;
         this.postRepository = postRepository;
         this.sceneRepository = sceneRepository;
         this.slideRepository = slideRepository;
@@ -178,12 +193,16 @@ public class ContentPostService {
         boolean attachEndCta = extractBoolean(settings.get("attachEndCta"), true);
         String brandCta = (settings.containsKey("cta") && settings.get("cta") != null && !settings.get("cta").toString().isBlank())
                 ? extractString(settings.get("cta"))
-                : ((brand != null && brand.getCta() != null && !brand.getCta().isBlank()) ? brand.getCta() : "Download OZO Health app");
+                : ((brand != null && brand.getCta() != null && !brand.getCta().isBlank()) ? brand.getCta() : "");
         int carouselSlideCount = extractInt(settings.get("carouselSlideCount"), 6);
 
         String videoAspectRatio = extractString(settings.getOrDefault("videoAspectRatio", "9:16"));
         PresenterProfileEntity presenter = presenterRepository.findByIsDefaultTrue().orElse(null);
         VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
+
+        if (contentType == ContentType.STORY) {
+            return storyService.planStory(idempotencyKey, date, batchId, eventId, topic, industry, brandTone, audience, brandCta);
+        }
 
         Map<String, Object> storyboard = aiProviderService.generateScriptAndStoryboard(
                 topic, industry, brandTone, contentType, mode, effectiveDuration, audience, brollCount, brollClipDuration,
@@ -416,6 +435,10 @@ public class ContentPostService {
             }
         }
 
+        if (post.getContentType() == ContentType.REEL) {
+            consentGuard.requireFace();
+            consentGuard.requireVoice();
+        }
         post.setClinicalReviewApproved(true);
         post.setErrorMessage(null);
 
@@ -442,7 +465,7 @@ public class ContentPostService {
                 .build());
 
         if (post.getContentType() == ContentType.REEL) {
-            java.util.concurrent.CompletableFuture.runAsync(() -> {
+            runInBackground(() -> {
                 try {
                     generateAudioSamples(postId);
                 } catch (Exception e) {
@@ -451,7 +474,7 @@ public class ContentPostService {
             });
         } else {
             // Trigger Media Generation asynchronously in background thread so approval transaction commits immediately
-            java.util.concurrent.CompletableFuture.runAsync(() -> {
+            runInBackground(() -> {
                 try {
                     triggerMediaGeneration(postId);
                 } catch (Exception e) {
@@ -471,9 +494,10 @@ public class ContentPostService {
             }
         }
         VoiceLibraryEntity voice = voiceRepository.findByIsDefaultTrue().orElse(null);
-        return (voice != null && voice.getProviderVoiceId() != null && !voice.getProviderVoiceId().isBlank())
-                ? voice.getProviderVoiceId()
-                : "rRAzMEZ6U57ivzmuPBhL";
+        if (voice == null || voice.getProviderVoiceId() == null || voice.getProviderVoiceId().isBlank()) {
+            throw new IllegalStateException("This brand has no default voice yet. Add one in Voices first.");
+        }
+        return voice.getProviderVoiceId();
     }
 
     private String buildReelNarrationText(ContentPostEntity post, List<ContentSceneEntity> scenes) {
@@ -549,7 +573,7 @@ public class ContentPostService {
         post = postRepository.save(post);
 
         final Long targetPostId = postId;
-        java.util.concurrent.CompletableFuture.runAsync(() -> generateAudioSamples(targetPostId));
+        runInBackground(() -> generateAudioSamples(targetPostId));
         return post;
     }
 
@@ -615,7 +639,7 @@ public class ContentPostService {
                 .build());
 
         final Long targetPostId = postId;
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
+        runInBackground(() -> {
             try {
                 triggerMediaGeneration(targetPostId);
             } catch (Exception e) {
@@ -657,7 +681,7 @@ public class ContentPostService {
         }
 
         final Long targetPostId = postId;
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
+        runInBackground(() -> {
             try {
                 triggerMediaGeneration(targetPostId);
             } catch (Exception e) {
@@ -698,6 +722,11 @@ public class ContentPostService {
         // =====================================================================
         // 1. CAROUSEL MEDIA PIPELINE (OPENAI DYNAMIC AI SLIDE GENERATION)
         // =====================================================================
+        if (post.getContentType() == ContentType.STORY) {
+            storyService.renderFrames(post.getId());
+            return;
+        }
+
         if (post.getContentType() == ContentType.CAROUSEL) {
             log.info("Processing media approval for Carousel post {}...", postId);
             BrandProfileEntity brand = brandRepository.findByIsDefaultTrue().orElse(null);
@@ -1266,8 +1295,15 @@ public class ContentPostService {
         ContentPostEntity post = postRepository.findById(postId)
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
 
+        if (post.getStatus() != PostStatus.PENDING_FINAL_APPROVAL && post.getStatus() != PostStatus.FINAL_APPROVED
+                && post.getStatus() != PostStatus.PUBLISH_FAILED) {
+            throw new IllegalStateException("Only finished content waiting for final approval can be scheduled");
+        }
         post.setStatus(PostStatus.SCHEDULED);
         post.setScheduledAt(scheduledAt != null ? scheduledAt : LocalDateTime.now().plusHours(2));
+        post.setPublishAttempts(0);
+        post.setNextPublishAttemptAt(null);
+        post.setPublishError(null);
         postRepository.save(post);
 
         approvalRepository.save(ContentApprovalEntity.builder()
@@ -1309,58 +1345,26 @@ public class ContentPostService {
     /**
      * Phase 10: Publish Now to Instagram
      */
-    @Transactional
+    /** Publishes to the brand's Instagram right away (see PublishingService for formats, retries and errors). */
     public ContentPostEntity publishNow(Long postId) {
-        ContentPostEntity post = postRepository.findById(postId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+        return publishingService.publish(postId);
+    }
 
-        post.setStatus(PostStatus.PUBLISHING);
-        postRepository.save(post);
-
-        Map<String, String> pubResult = aiProviderService.publishToInstagram(
-                postId, post.getFinalRenderUrl(), post.getThumbnailUrl(), post.getCaption() + "\n\n" + post.getHashtags()
-        );
-
-        post.setInstagramContainerId(pubResult.get("containerId"));
-        post.setInstagramMediaId(pubResult.get("mediaId"));
-        post.setPublishedPermalink(pubResult.get("permalink"));
-        post.setPublishedAt(LocalDateTime.now());
-        post.setStatus(PostStatus.PUBLISHED);
-
-        publicationRepository.save(InstagramPublicationEntity.builder()
-                .postId(postId)
-                .containerId(pubResult.get("containerId"))
-                .mediaId(pubResult.get("mediaId"))
-                .permalink(pubResult.get("permalink"))
-                .scheduledAt(post.getScheduledAt())
-                .publishedAt(LocalDateTime.now())
-                .status("PUBLISHED")
-                .build());
-
-        // Cross-post to connected Facebook Page if enabled
-        try {
-            Map<String, Object> masterSettings = settingsService.getAllSettings();
-            boolean crossPostEnabled = !Boolean.FALSE.equals(masterSettings.get("crossPostToFacebook"));
-            String fbPageId = (String) masterSettings.get("facebookPageId");
-
-            if (crossPostEnabled && fbPageId != null && !fbPageId.isBlank()) {
-                boolean isVideo = post.getContentType() == null || post.getContentType() == ContentType.REEL;
-                String mediaUrl = isVideo ? post.getFinalRenderUrl() : (post.getThumbnailUrl() != null ? post.getThumbnailUrl() : post.getFinalRenderUrl());
-                Map<String, String> fbResult = aiProviderService.publishToFacebookPage(
-                        postId, mediaUrl, post.getCaption() + "\n\n" + post.getHashtags(), isVideo
-                );
-                if (fbResult != null) {
-                    post.setFacebookPostId(fbResult.get("postId"));
-                    post.setFacebookPermalink(fbResult.get("permalink"));
-                    log.info("Cross-posted to Facebook Page successfully. FB Post ID: {}, permalink: {}",
-                            fbResult.get("postId"), fbResult.get("permalink"));
-                }
-            }
-        } catch (Exception fbEx) {
-            log.warn("Facebook cross-posting error for post {}: {}", postId, fbEx.getMessage());
+    /** Publishes an already-published post again (a new Instagram post). */
+    public ContentPostEntity repost(Long postId) {
+        ContentPostEntity post = postRepository.findById(postId).orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+        if (post.getStatus() == PostStatus.PUBLISHED) {
+            post.setStatus(PostStatus.SCHEDULED);
+            post.setScheduledAt(LocalDateTime.now());
+            post.setPublishedAt(null);
+            post.setPublishAttempts(0);
+            postRepository.save(post);
         }
+        return publishingService.publish(postId);
+    }
 
-        return postRepository.save(post);
+    public ContentPostEntity retryPublish(Long postId) {
+        return publishingService.retry(postId);
     }
 
     /**

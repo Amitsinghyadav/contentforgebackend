@@ -27,10 +27,14 @@ public class VideoAvatarService {
     private final StorageService storageService;
     private final AiProviderService aiProviderService;
 
+    private final ConsentGuard consentGuard;
+
     public VideoAvatarService(VideoAvatarRepository videoAvatarRepository,
                               PresenterProfileRepository presenterRepository,
                               StorageService storageService,
-                              AiProviderService aiProviderService) {
+                              AiProviderService aiProviderService,
+                              ConsentGuard consentGuard) {
+        this.consentGuard = consentGuard;
         this.videoAvatarRepository = videoAvatarRepository;
         this.presenterRepository = presenterRepository;
         this.storageService = storageService;
@@ -48,6 +52,7 @@ public class VideoAvatarService {
     @Transactional
     public VideoAvatarEntity createVideoAvatar(String name, String description, MultipartFile videoFile,
                                               Boolean isDefault, Long linkPresenterId) {
+        consentGuard.requireFace();
         log.info("Creating dynamic Video Avatar from dashboard upload: '{}', file size: {} bytes",
                 name, videoFile.getSize());
 

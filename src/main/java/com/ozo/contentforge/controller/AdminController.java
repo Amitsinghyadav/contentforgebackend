@@ -1,163 +1,125 @@
 package com.ozo.contentforge.controller;
 
+import com.ozo.contentforge.model.entity.BrandEntity;
+import com.ozo.contentforge.model.entity.BrandSubscriptionEntity;
 import com.ozo.contentforge.model.entity.PlanEntity;
 import com.ozo.contentforge.model.entity.UserEntity;
-import com.ozo.contentforge.model.entity.UserSubscriptionEntity;
-import com.ozo.contentforge.repository.UserRepository;
+import com.ozo.contentforge.service.BrandService;
 import com.ozo.contentforge.service.PlanService;
-import com.ozo.contentforge.service.security.PasswordService;
+import com.ozo.contentforge.service.TeamService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.*;
+import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
+/** Admin app: client brands, their plans, the team, and the plan catalogue. Admins only (see AuthenticationFilter). */
 @RestController
 @RequestMapping("/api/v1/admin")
-@CrossOrigin
 public class AdminController {
 
-    private final UserRepository userRepository;
+    private final BrandService brandService;
     private final PlanService planService;
-    private final PasswordService passwordService;
+    private final TeamService teamService;
 
-    public AdminController(UserRepository userRepository,
-                           PlanService planService,
-                           PasswordService passwordService) {
-        this.userRepository = userRepository;
+    public AdminController(BrandService brandService, PlanService planService, TeamService teamService) {
+        this.brandService = brandService;
         this.planService = planService;
-        this.passwordService = passwordService;
+        this.teamService = teamService;
     }
 
-    // =========================================================================
-    // 1. BUSINESS CLIENT ONBOARDING & MANAGEMENT
-    // =========================================================================
+    // ---- Brands ----
 
-    @GetMapping("/users")
-    public ResponseEntity<List<Map<String, Object>>> getAllUsers() {
-        List<UserEntity> users = userRepository.findAll();
-        List<Map<String, Object>> result = new ArrayList<>();
-
-        for (UserEntity u : users) {
-            Optional<UserSubscriptionEntity> sub = planService.getActiveSubscriptionForUser(u.getId());
-            Map<String, Object> map = new HashMap<>();
-            map.put("id", u.getId());
-            map.put("email", u.getEmail());
-            map.put("role", u.getRole());
-            map.put("adminName", u.getAdminName());
-            map.put("organizationName", u.getOrganizationName());
-            map.put("registrationNo", u.getRegistrationNo());
-            map.put("gstNo", u.getGstNo());
-            map.put("mobileNo", u.getMobileNo());
-            map.put("active", u.getActive());
-            map.put("createdAt", u.getCreatedAt());
-            map.put("subscription", sub.orElse(null));
-            result.add(map);
+    public record BrandRequest(String name, String industry, String contactName, String contactEmail, String contactPhone,
+                               String registrationNo, String gstNo, String notes, Long planId, LocalDate planStartDate) {
+        BrandService.BrandDetails details() {
+            return new BrandService.BrandDetails(name, industry, contactName, contactEmail, contactPhone, registrationNo, gstNo, notes);
         }
-        return ResponseEntity.ok(result);
     }
 
-    @PostMapping("/users")
-    public ResponseEntity<?> onboardUser(@RequestBody Map<String, Object> req) {
-        String email = (String) req.get("email");
-        String password = (String) req.get("password");
-        String organizationName = (String) req.get("organizationName");
-        String adminName = (String) req.get("adminName");
-        String registrationNo = (String) req.get("registrationNo");
-        String gstNo = (String) req.get("gstNo");
-        String mobileNo = (String) req.get("mobileNo");
-        Number planIdNum = (Number) req.get("initialPlanId");
-
-        if (email == null || email.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Email is required"));
-        }
-        if (password == null || password.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Password is required"));
-        }
-        if (organizationName == null || organizationName.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Organization name is required"));
-        }
-        if (userRepository.existsByEmailIgnoreCase(email.trim())) {
-            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "A client with this email already exists"));
-        }
-
-        UserEntity user = UserEntity.builder()
-                .email(email.trim().toLowerCase())
-                .passwordHash(passwordService.hashPassword(password))
-                .role("BUSINESS")
-                .organizationName(organizationName.trim())
-                .adminName(adminName != null ? adminName.trim() : null)
-                .registrationNo(registrationNo != null ? registrationNo.trim() : null)
-                .gstNo(gstNo != null ? gstNo.trim() : null)
-                .mobileNo(mobileNo != null ? mobileNo.trim() : null)
-                .active(true)
-                .build();
-
-        UserEntity savedUser = userRepository.save(user);
-
-        // Optionally assign initial plan if provided
-        UserSubscriptionEntity sub = null;
-        if (planIdNum != null) {
-            sub = planService.assignPlanToUser(savedUser.getId(), planIdNum.longValue(), "MONTHLY", 1);
-        }
-
-        Map<String, Object> res = new HashMap<>();
-        res.put("message", "Business onboarded successfully");
-        res.put("user", savedUser);
-        res.put("subscription", sub);
-        return ResponseEntity.status(HttpStatus.CREATED).body(res);
+    @GetMapping("/brands")
+    public List<Map<String, Object>> listBrands() {
+        return brandService.listAll().stream().map(brandService::adminView).toList();
     }
 
-    @PutMapping("/users/{id}")
-    public ResponseEntity<?> updateUser(@PathVariable("id") Long id, @RequestBody Map<String, Object> req) {
-        UserEntity user = userRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("User not found: " + id));
-
-        if (req.containsKey("organizationName") && req.get("organizationName") != null) {
-            user.setOrganizationName((String) req.get("organizationName"));
-        }
-        if (req.containsKey("adminName")) {
-            user.setAdminName((String) req.get("adminName"));
-        }
-        if (req.containsKey("registrationNo")) {
-            user.setRegistrationNo((String) req.get("registrationNo"));
-        }
-        if (req.containsKey("gstNo")) {
-            user.setGstNo((String) req.get("gstNo"));
-        }
-        if (req.containsKey("mobileNo")) {
-            user.setMobileNo((String) req.get("mobileNo"));
-        }
-        if (req.containsKey("active") && req.get("active") != null) {
-            user.setActive(Boolean.TRUE.equals(req.get("active")));
-        }
-        if (req.containsKey("password") && req.get("password") != null && !((String) req.get("password")).isBlank()) {
-            user.setPasswordHash(passwordService.hashPassword((String) req.get("password")));
-        }
-
-        return ResponseEntity.ok(userRepository.save(user));
+    @PostMapping("/brands")
+    public ResponseEntity<Map<String, Object>> createBrand(@RequestBody BrandRequest req) {
+        BrandEntity brand = brandService.create(req.details(), req.planId(), req.planStartDate());
+        return ResponseEntity.status(HttpStatus.CREATED).body(brandService.adminView(brand));
     }
 
-    @PostMapping("/users/{id}/assign-plan")
-    public ResponseEntity<?> assignPlan(@PathVariable("id") Long id, @RequestBody Map<String, Object> req) {
-        Number planIdNum = (Number) req.get("planId");
-        if (planIdNum == null) {
-            return ResponseEntity.badRequest().body(Map.of("error", "planId is required"));
-        }
-        String billingCycle = (String) req.getOrDefault("billingCycle", "MONTHLY");
-        int durationMonths = req.containsKey("durationMonths") ? ((Number) req.get("durationMonths")).intValue() : 1;
-
-        UserSubscriptionEntity sub = planService.assignPlanToUser(id, planIdNum.longValue(), billingCycle, durationMonths);
-        return ResponseEntity.ok(sub);
+    @PutMapping("/brands/{id}")
+    public Map<String, Object> updateBrand(@PathVariable("id") Long id, @RequestBody BrandRequest req) {
+        return brandService.adminView(brandService.update(id, req.details()));
     }
 
-    // =========================================================================
-    // 2. PLANS & QUOTAS MANAGEMENT
-    // =========================================================================
+    @PatchMapping("/brands/{id}/active")
+    public Map<String, Object> setBrandActive(@PathVariable("id") Long id, @RequestBody Map<String, Boolean> req) {
+        return brandService.adminView(brandService.setActive(id, Boolean.TRUE.equals(req.get("active"))));
+    }
+
+    /** Custom counts are optional: send them to give the brand its own monthly numbers (Custom tier). */
+    public record AssignPlanRequest(Long planId, LocalDate startDate, Integer avatarReels, Integer explainers,
+                                    Integer carousels, Integer imagePosts, Integer storyFrames, Integer minFaceVideos) {
+        PlanService.Counts customCounts() {
+            if (avatarReels == null && explainers == null && carousels == null && imagePosts == null && storyFrames == null) {
+                return null;
+            }
+            return new PlanService.Counts(nz(avatarReels), nz(explainers), nz(carousels), nz(imagePosts), nz(storyFrames), nz(minFaceVideos));
+        }
+
+        private static int nz(Integer n) {
+            return n != null ? n : 0;
+        }
+    }
+
+    @PostMapping("/brands/{id}/plan")
+    public BrandSubscriptionEntity assignPlan(@PathVariable("id") Long id, @RequestBody AssignPlanRequest req) {
+        if (req.planId() == null) throw new IllegalArgumentException("Choose a plan");
+        return planService.assignPlan(id, req.planId(), req.startDate(), req.customCounts());
+    }
+
+    // ---- Team ----
+
+    public record TeamRequest(String email, String name, String role, String password, Boolean active) {
+    }
+
+    @GetMapping("/team")
+    public List<Map<String, Object>> listTeam() {
+        return teamService.list().stream().map(AdminController::teamView).toList();
+    }
+
+    @PostMapping("/team")
+    public ResponseEntity<Map<String, Object>> createTeamMember(@RequestBody TeamRequest req) {
+        UserEntity user = teamService.create(req.email(), req.name(), req.role(), req.password());
+        return ResponseEntity.status(HttpStatus.CREATED).body(teamView(user));
+    }
+
+    @PutMapping("/team/{id}")
+    public Map<String, Object> updateTeamMember(@PathVariable("id") Long id, @RequestBody TeamRequest req) {
+        return teamView(teamService.update(id, req.name(), req.role(), req.active(), req.password()));
+    }
+
+    /** Never returns the password hash. */
+    static Map<String, Object> teamView(UserEntity u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", u.getId());
+        m.put("email", u.getEmail());
+        m.put("name", u.getAdminName() != null ? u.getAdminName() : "");
+        m.put("role", u.getRole());
+        m.put("active", u.getActive());
+        m.put("createdAt", u.getCreatedAt());
+        return m;
+    }
+
+    // ---- Plans ----
 
     @GetMapping("/plans")
-    public ResponseEntity<List<PlanEntity>> getAllPlans() {
-        return ResponseEntity.ok(planService.getAllPlans());
+    public List<PlanEntity> listPlans() {
+        return planService.getAllPlans();
     }
 
     @PostMapping("/plans")
@@ -166,14 +128,12 @@ public class AdminController {
     }
 
     @PutMapping("/plans/{id}")
-    public ResponseEntity<PlanEntity> updatePlan(@PathVariable("id") Long id, @RequestBody PlanEntity plan) {
-        return ResponseEntity.ok(planService.updatePlan(id, plan));
+    public PlanEntity updatePlan(@PathVariable("id") Long id, @RequestBody PlanEntity plan) {
+        return planService.updatePlan(id, plan);
     }
 
     @DeleteMapping("/plans/{id}")
-    public ResponseEntity<Void> deletePlan(@PathVariable("id") Long id) {
-        planService.deletePlan(id);
-        return ResponseEntity.noContent().build();
+    public PlanEntity retirePlan(@PathVariable("id") Long id) {
+        return planService.retirePlan(id);
     }
 }
-

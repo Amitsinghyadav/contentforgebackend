@@ -1,5 +1,6 @@
 package com.ozo.contentforge.model.entity;
 
+import com.ozo.contentforge.tenancy.BrandOwnedEntity;
 import com.ozo.contentforge.model.enums.AvatarEngine;
 import com.ozo.contentforge.model.enums.ContentType;
 import com.ozo.contentforge.model.enums.PostMode;
@@ -11,14 +12,14 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "content_posts", uniqueConstraints = {
-    @UniqueConstraint(columnNames = {"idempotency_key"})
+    @UniqueConstraint(name = "uk_post_brand_idempotency", columnNames = {"brand_id", "idempotency_key"})
 })
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class ContentPostEntity {
+public class ContentPostEntity extends BrandOwnedEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -173,6 +174,18 @@ public class ContentPostEntity {
 
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
+
+    // ---- Publishing ----
+
+    @Column(name = "publish_attempts")
+    private Integer publishAttempts;
+
+    /** When the publisher may try again after a temporary failure. */
+    @Column(name = "next_publish_attempt_at")
+    private LocalDateTime nextPublishAttemptAt;
+
+    @Column(name = "publish_error", columnDefinition = "TEXT")
+    private String publishError;
 
     @PrePersist
     public void onCreate() {
